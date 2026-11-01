@@ -1323,7 +1323,7 @@ class SessionDB(
 
         The quarantine keeps the retired frames from being checkpointed under wrong page numbers,
         but they live only in an unlinked inode that dies with this process's last descriptor, and
-        the canonical DeletedWalGenerationError remediation is to stop the writers. Capturing at the
+        the holders must retain them until recovery is verified. Capturing at the
         first halt (or at close(), whichever sees the loss first) makes "preserve" outlive the
         process. Raises RetiredGenerationCaptureError; nothing is mutated on failure."""
         with self._retired_capture_lock:

@@ -75,4 +75,7 @@ def test_doctor_names_retired_wal_holders_instead_of_healthy_state_db(tmp_path, 
     assert "4242" in out and "retired WAL" in out
     assert "✓" not in out
     assert probed == [] and finding.fixed == 0
-    assert any("4242" in issue and "gateway stop" in issue for issue in finding.issues)
+    issue = next(issue for issue in finding.issues if "4242" in issue)
+    assert "keep these processes open" in issue
+    assert "durable recovery copy" in issue and "Recovery is not yet verified" in issue
+    assert "gateway stop" not in issue and "quit the Desktop" not in issue

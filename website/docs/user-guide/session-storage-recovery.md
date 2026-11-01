@@ -17,34 +17,31 @@ purpose and every turn answers with a message like:
 > another Hermes process still holds an old copy of the session database's write-ahead log,
 > so Hermes stopped writing to keep the file safe …
 
-This page is the guide that message links to. Nothing is lost when you see it; the
-refusal exists precisely so nothing gets lost.
+This refusal prevents further writes through a mismatched database generation. It does
+not prove that a recovery copy exists or that every conversation can be recovered.
 
-## The fix in three steps
+## Preserve the recovery source first
 
-1. **Quit every Hermes process on that profile.** Desktop app, gateway, dashboard, cron:
+1. **Keep the processes holding the affected profile open.** A deleted database or WAL
+   can remain accessible only through an existing process handle. Closing the last holder
+   can discard that copy. Do not restart the gateway, quit the Desktop app, or stop the
+   remaining holders until recovery evidence has been verified.
 
-   ```bash
-   hermes gateway stop          # add -p <profile> for a named profile
-   ```
+2. **Identify holders with `hermes doctor`** (add `-p <profile>` for a named profile).
+   Use the inspection command without `--fix`. Keep its output and the affected profile's
+   recovery logs. Process-inventory failure does not establish that no holder exists.
 
-   then quit the Desktop app from its menu and stop any dashboard (`hermes dashboard --stop`)
-   or custom service you run. Restarting *one* of them is not enough — a single process left
-   holding the old log keeps every new one refusing.
+3. **Have an operator verify a durable recovery copy.** Hermes attempts to capture a
+   retired generation, but capture can fail. A `state.db.retired-wal-*` directory is forensic
+   evidence, not by itself a complete, restorable backup. Preserve it and its manifest; an
+   operator must establish that the captured database and log belong together and cover the
+   data being recovered. If verification fails, retain the holders and seek recovery help.
+   Do not use a restart or `doctor --fix` as a substitute for this verification.
 
-2. **Ask doctor who is still holding the log.**
-
-   ```bash
-   hermes doctor                # add -p <profile> for a named profile
-   ```
-
-   While anything still holds the retired log, doctor prints each holder as
-   `PID N (command)` with the same remedy, and skips its health probes and any `--fix` work
-   so it cannot become another writer. Stop the listed processes and run it again until the
-   line is gone.
-
-3. **Start Hermes again** (one process first — the gateway or the Desktop app) and send your
-   message once more. Your conversation resumes from where it stopped.
+After that verification, the operator can coordinate a graceful stop, inspect the recovery
+source, and choose a supported restore/restart procedure. Start one process first and verify
+both recovered conversations and new writes before resuming other writers. A cleared refusal
+alone is not proof that earlier data was recovered.
 
 ## Do not
 
@@ -97,11 +94,10 @@ no gateway is running and some other process holds the database.
 | `state.db.corrupt.<timestamp>.bak`, `*.malformed-backup` | Copies of a file Hermes found damaged before it repaired or quarantined it. | Do not restore them over `state.db` — they are the same damage. Keep for a report; safe to delete once you are back to normal. |
 | `state-snapshots/` | Quick snapshots `hermes update` and `hermes backup` take. | Restore with every Hermes process stopped; see [`hermes backup`](../reference/cli-commands.md#hermes-backup). |
 
-## When the three steps do not work
+## After a verified recovery copy and coordinated stop
 
-If every Hermes process is stopped, `hermes doctor` no longer lists a holder, and the
-gateway still refuses to write when you start it, the file itself may be damaged. Stop
-everything again and inspect without writing:
+Once the operator has verified the recovery copy and coordinated the stop, inspect the
+selected source before restoring it. For an existing main database file:
 
 ```bash
 hermes sessions recover --source ~/.hermes/state.db --inspect-only

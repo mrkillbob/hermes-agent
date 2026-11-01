@@ -223,14 +223,14 @@ _STATE_DB_REPLACED_MSG = (
 STORAGE_RECOVERY_DOCS_URL = "https://hermes-agent.nousresearch.com/docs/user-guide/session-storage-recovery"
 
 # Two layers (#110054): the first sentence is for the person reading a chat bubble or a banner (what
-# happened, nothing is lost, the one thing to do); the rest is the operator detail. The phrase
+# happened and how to preserve recoverability); the rest is the operator detail. The phrase
 # "deleted state.db-wal or state.db-shm" is the classifier's RPC-wrapped fingerprint — keep it.
 _DELETED_WAL_GENERATION_MSG = (
     "FATAL: session storage stopped writing because another Hermes process still holds a deleted "
-    "state.db-wal or state.db-shm inode (an old copy of the write-ahead log). Nothing is lost: quit "
-    "every Hermes process on this profile (Desktop app, gateway, dashboard, cron), run `hermes doctor` "
-    "(it names the processes still holding the log), then start Hermes again. Do not delete the WAL "
-    "yourself and do not run `hermes doctor --fix` while they are running. "
+    "state.db-wal or state.db-shm inode (an old copy of the write-ahead log). Recovery is not yet "
+    "verified. Keep the processes holding this profile open until an operator verifies a durable "
+    "recovery copy; closing them can discard the only remaining copy. Run `hermes doctor` to "
+    "identify holders. Do not delete database files or run `hermes doctor --fix` while they are open. "
     f"Guide: {STORAGE_RECOVERY_DOCS_URL} "
     "Detail: the path names a different (or missing) generation than the one this process holds "
     "open; opening or writing through it would mint a second WAL (split-brain). "

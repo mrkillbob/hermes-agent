@@ -58,18 +58,20 @@ _STORAGE_FAILURES: dict[str, tuple[str, str, str]] = {
     "replaced": (
         "storage_replaced",
         "the session database file was replaced while Hermes was running",
-        "Stop Hermes (`hermes {profile_arg}gateway stop`), run `hermes {profile_arg}doctor`, then start it again.",
+        "Keep the processes holding this profile open until an operator verifies a durable recovery copy; "
+        "closing them can discard the only remaining copy. Run `hermes {profile_arg}doctor` to identify "
+        "holders. Do not delete database files or run `doctor --fix` while they are open.",
     ),
-    # Code stays `storage_replaced` (GUI clients key on it); the copy names the real remedy: every writer
-    # on the profile must stop, doctor names the ones still holding the retired log (#110054).
+    # Code stays `storage_replaced` (GUI clients key on it). A capture may fail, so do not promise
+    # recoverability or instruct the user to close the holders before it has been verified.
     "deleted_wal": (
         "storage_replaced",
         "another Hermes process still holds an old copy of the session database's write-ahead log, "
         "so Hermes stopped writing to keep the file safe",
-        "Nothing is lost. Quit every Hermes process on this profile (Desktop app, "
-        "`hermes {profile_arg}gateway stop`, dashboard, cron), run `hermes {profile_arg}doctor` — it names "
-        "any process still holding the log — then start Hermes again. Do not run `doctor --fix` or delete "
-        "any state.db files while they run. Guide: " + STORAGE_RECOVERY_DOCS_URL,
+        "Recovery is not yet verified. Keep the processes holding this profile open until an operator "
+        "verifies a durable recovery copy; closing them can discard the only remaining copy. "
+        "Run `hermes {profile_arg}doctor` to identify holders. Do not run `doctor --fix` or delete "
+        "database files while they are open. Guide: " + STORAGE_RECOVERY_DOCS_URL,
     ),
     "compression": (
         "storage_busy",
