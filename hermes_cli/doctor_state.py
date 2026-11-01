@@ -463,7 +463,6 @@ def _retired_wal_holders(f: Finding, state_db_path: Path, _DHH: str) -> bool:
     """Name the processes holding a retired -wal/-shm generation (#110054). Every SessionDB open is
     refused while they live, and the current inode has no holders, so the plain holder count says
     "0 holding the DB open" beside a green state.db line — the opposite of the truth."""
-    from hermes_constants import profile_cli_selector
     from hermes_state_dbfile import iter_deleted_sqlite_sidecar_holders
     from hermes_state_holders import describe_holder_pid
     pids = list(dict.fromkeys(pid for pid, _ in iter_deleted_sqlite_sidecar_holders(state_db_path)))
@@ -472,10 +471,10 @@ def _retired_wal_holders(f: Finding, state_db_path: Path, _DHH: str) -> bool:
     rendered = ", ".join(describe_holder_pid(pid) for pid in pids)
     check_warn(f"{_DHH}/state.db: {len(pids)} process(es) still hold a retired WAL generation ({rendered})",
                "(every new session refuses to open until they exit; health/stats probes skipped)")
-    f.issues.append(f"state.db retired WAL generation held by {rendered}{host_gateway_note()} — stop the host "
-                    f"gateway, dashboard and cron writers among them ('hermes {profile_cli_selector()}gateway "
-                    "stop' stops the ONE host process serving every profile, quit the Desktop app), do not "
-                    "delete the WAL yourself, then rerun 'hermes doctor'")
+    f.issues.append(f"state.db retired WAL generation held by {rendered}{host_gateway_note()} — keep these "
+                    "processes open until an operator verifies a durable recovery copy; closing the last "
+                    "holder can discard the only remaining copy. Recovery is not yet verified. Do not "
+                    "delete database files or run 'hermes doctor --fix' while they are open.")
     return True
 
 
