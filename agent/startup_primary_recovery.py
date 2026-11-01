@@ -22,8 +22,8 @@ class PrimaryIntent:
 
 
 def pending_primary_intent(agent):
-    if (not agent.provider or agent.requested_provider != agent.provider or agent.base_url
-            or agent.api_mode != 'chat_completions' or not agent.model):
+    if (not agent.provider or getattr(agent, 'requested_provider', None) != agent.provider or agent.base_url
+            or getattr(agent, 'api_mode', None) != 'chat_completions' or not agent.model):
         return None
     definition = _qualified_definition(agent.provider)
     return (PrimaryIntent(agent.provider, agent.model, definition.base_url.rstrip('/'), agent.api_mode)

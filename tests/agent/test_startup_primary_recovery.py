@@ -228,3 +228,15 @@ def test_unavailable_metadata_keeps_existing_fallback(startup_agent, monkeypatch
     assert pending_primary_intent(requested) is None
     assert agent._restore_primary_runtime() is False
     assert agent.provider == 'deepseek'
+
+
+@pytest.mark.parametrize('missing', ['requested_provider', 'api_mode'])
+def test_partial_initialization_cannot_infer_primary_intent(monkeypatch, missing):
+    from agent.startup_primary_recovery import pending_primary_intent
+    fields = dict(provider='openai-api', requested_provider='openai-api', base_url='',
+                  model='gpt-4.1-mini', api_mode='chat_completions')
+    del fields[missing]
+    qualify = Mock(side_effect=AssertionError('incomplete route must not resolve provider metadata'))
+    monkeypatch.setattr('agent.startup_primary_recovery._qualified_definition', qualify)
+    assert pending_primary_intent(SimpleNamespace(**fields)) is None
+    qualify.assert_not_called()
