@@ -1967,14 +1967,20 @@ def _cmd_update_impl(args, gateway_mode: bool):
             print("→ Updates available (commit count unknown on this shallow checkout)")
 
         print("→ Pulling updates...")
-        movement_baseline = _pull_updates(
-            git_cmd, branch, _plan.auto_stash_ref, prompt_for_restore=_plan.prompt_for_restore,
-            gw_input_fn=gw_input_fn, discard_local_changes=opts.discard_local_changes,
-            keep_stash=opts.keep_stash, target_ref=target_ref, pre_sync_sha=_plan.pre_sync_sha,
-            rollback_branch=_plan.rollback_branch,
-            sync_upstream=is_fork and branch == "main" and not release_sha, assume_yes=assume_yes,
-            in_place_update=_plan.in_place_update, _windows_gateway_resume=_windows_gateway_resume,
-            expected_sha=completion_request.get("expected_sha"))
+        try:
+            movement_baseline = _pull_updates(
+                git_cmd, branch, _plan.auto_stash_ref, prompt_for_restore=_plan.prompt_for_restore,
+                gw_input_fn=gw_input_fn, discard_local_changes=opts.discard_local_changes,
+                keep_stash=opts.keep_stash, target_ref=target_ref, pre_sync_sha=_plan.pre_sync_sha,
+                rollback_branch=_plan.rollback_branch,
+                sync_upstream=is_fork and branch == "main" and not release_sha, assume_yes=assume_yes,
+                in_place_update=_plan.in_place_update, _windows_gateway_resume=_windows_gateway_resume,
+                expected_sha=completion_request.get("expected_sha"))
+        except SystemExit:
+            # Pull restoration and stash handling have settled; keep checkout custody
+            # through guarded recovery rather than leaving it to process shutdown.
+            _resume_paused_gateways_at_exit(_windows_gateway_resume, completion_request)
+            raise
         _apply_pulled_update(
             git_cmd, branch, movement_baseline, _plan,
             _windows_gateway_resume=_windows_gateway_resume, completion_request=completion_request)
