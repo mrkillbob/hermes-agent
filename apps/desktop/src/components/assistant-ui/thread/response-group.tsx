@@ -83,7 +83,13 @@ export function ResponseMessages({ components, indices }: ResponseMessagesProps)
       const section: ResponseSection =
         response && previous?.response
           ? previous
-          : { key: messageKey, indices: [], messageKeys: [], assistantIds: [], response }
+          : {
+              key: response ? `response:${previous?.key ?? 'root'}` : messageKey,
+              indices: [],
+              messageKeys: [],
+              assistantIds: [],
+              response
+            }
 
       if (section !== previous) {
         result.push(section)
