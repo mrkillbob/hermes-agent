@@ -19,7 +19,9 @@ from hermes_cli import (
     update_receipt,
     update_stage,
 )
-from tests.compat.old_updater_support import no_external_work as no_external_work
+from tests.compat import old_updater_support
+
+no_external_work = old_updater_support.no_external_work
 
 
 def _noop(*args, **kwargs):
