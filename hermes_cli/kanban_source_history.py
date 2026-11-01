@@ -70,8 +70,8 @@ def _claim_payload(event):
     return payload
 
 
-def _claimed_boundary(run, events, terminal_runs):
-    """Bind an ordinary crash attempt to its unique claim and closing events."""
+def _claimed_boundary(run, events, terminal_runs, *, boundary_outcomes=('crashed',)):
+    """Bind an explicitly supported outcome to its unique claim and closing events."""
     claims = []
     rid, lock = run['id'], run.get('claim_lock')
     for event in events:
@@ -86,8 +86,8 @@ def _claimed_boundary(run, events, terminal_runs):
             raise ValueError('source resolution refuses unbound historical claim evidence')
         claims.append(event)
     closing = [event for event in events if event['run_id'] == rid and event['kind'] in terminal_runs]
-    if (len(claims) != 1 or len(closing) != 1 or closing[0]['kind'] != 'crashed'
-            or run['status'] != 'crashed' or run.get('outcome') != 'crashed'):
+    if (len(claims) != 1 or len(closing) != 1 or run['status'] not in boundary_outcomes
+            or closing[0]['kind'] != run['status'] or run.get('outcome') != run['status']):
         raise ValueError('source resolution requires unique ordinary crash boundary evidence')
     claim, close = claims[0], closing[0]
     if (not run['started_at'] <= claim['created_at'] <= run['ended_at']
@@ -98,7 +98,7 @@ def _claimed_boundary(run, events, terminal_runs):
     return claim, close
 
 
-def _require_recorded_run_order(runs, events, terminal_runs):
+def _require_recorded_run_order(runs, events, terminal_runs, *, boundary_outcomes=('crashed',)):
     # Integer wall-clock stamps can tie across serialized transactions. Only
     # exact claim/crash ledger bindings justify that boundary; run ID magnitude
     # or a reusable host:pid claim string is never the tie-breaking authority.
@@ -108,7 +108,8 @@ def _require_recorded_run_order(runs, events, terminal_runs):
             continue
         for run in (left, right):
             if run['id'] not in boundaries:
-                boundaries[run['id']] = _claimed_boundary(run, events, terminal_runs)
+                boundaries[run['id']] = _claimed_boundary(
+                    run, events, terminal_runs, boundary_outcomes=boundary_outcomes)
         left_close = boundaries[left['id']][1]
         right_claim = boundaries[right['id']][0]
         if left_close['id'] >= right_claim['id']:

@@ -17,6 +17,7 @@ import re
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli.kanban_source_resolution import _require_settled_source
+from hermes_cli.kanban_artifact_history import require_exhausted_artifact_history
 from hermes_cli.kanban_source_supersession import _require_inactive_intake
 from hermes_cli.kanban_task_revision import require_task_revision
 from hermes_cli.kanban_transfer import _selected_task_rows
@@ -84,10 +85,12 @@ def _require_bytes(value, expected):
 
 
 def _validate_acceptance(conn, task_id, *, board, expected_revision, evidence,
-                         artifact, provenance, allow_settled_history):
+                         artifact, provenance, allow_settled_history, allow_exhausted_history):
     """One evidence/hold validator for both observation and guarded mutation."""
     if (type(evidence) is not ArtifactAcceptance
-            or type(allow_settled_history) is not bool):
+            or type(allow_settled_history) is not bool
+            or type(allow_exhausted_history) is not bool
+            or (allow_exhausted_history and not allow_settled_history)):
         raise ValueError('explicit artifact acceptance is required')
     payload = evidence.payload()
     board = kb._require_slug(board)
@@ -100,7 +103,9 @@ def _validate_acceptance(conn, task_id, *, board, expected_revision, evidence,
         raise ValueError('artifact disposition connection does not match canonical board')
     rows = _selected_task_rows(conn, [task_id])
     require_task_revision(expected_revision, board, task_id, rows)
-    if allow_settled_history:
+    if allow_exhausted_history:
+        require_exhausted_artifact_history(rows)
+    elif allow_settled_history:
         _require_settled_source(rows)
     else:
         _require_inactive_intake(rows)
@@ -111,7 +116,8 @@ def _validate_acceptance(conn, task_id, *, board, expected_revision, evidence,
 
 def preview_accepted_artifact(conn, task_id, *, board, expected_revision, evidence,
                               artifact: bytes, provenance: bytes,
-                              allow_settled_history: bool = False):
+                              allow_settled_history: bool = False,
+                              allow_exhausted_history: bool = False):
     """Assess the existing artifact-only operation without writing or granting it.
 
     Uses a deferred read transaction, or the caller's existing snapshot. Opens no
@@ -127,9 +133,9 @@ def preview_accepted_artifact(conn, task_id, *, board, expected_revision, eviden
         payload, rows = _validate_acceptance(
             conn, task_id, board=board, expected_revision=expected_revision,
             evidence=evidence, artifact=artifact, provenance=provenance,
-            allow_settled_history=allow_settled_history)
+            allow_settled_history=allow_settled_history, allow_exhausted_history=allow_exhausted_history)
         return {
-            **payload, 'preview_only': True, 'admission_granted': False,
+            **payload, 'exhausted_history_reviewed': allow_exhausted_history, 'preview_only': True, 'admission_granted': False,
             'prior_status': rows['tasks'][0]['status'], 'proposed_status': 'archived',
             'scope': 'artifact_only', 'workspace_retained': True,
             'readiness_recomputed': False, 'completion_hooks_invoked': False,
@@ -142,12 +148,15 @@ def preview_accepted_artifact(conn, task_id, *, board, expected_revision, eviden
 
 def archive_accepted_artifact(conn, task_id, *, board, expected_revision, evidence,
                               artifact: bytes, provenance: bytes, allow_nested: bool = False,
-                              allow_settled_history: bool = False):
+                              allow_settled_history: bool = False,
+                              allow_exhausted_history: bool = False):
     """Archive accepted intake with one digest-only event and no completion hooks.
 
     Missing-input stops do not qualify as completed deliverables here. This path
     refuses links, active ownership and holds rather than releasing them. An
     explicit settled-history opt-in preserves qualified Blocked run history.
+    The separate exhausted-history opt-in accepts only validated terminal budget
+    lineage for an independently accepted artifact; it never permits execution.
     The caller retains the accepted artifact and provenance; neither body nor
     filesystem path is copied into the board's audit event.
 
@@ -161,7 +170,7 @@ def archive_accepted_artifact(conn, task_id, *, board, expected_revision, eviden
         payload, rows = _validate_acceptance(
             conn, task_id, board=board, expected_revision=expected_revision,
             evidence=evidence, artifact=artifact, provenance=provenance,
-            allow_settled_history=allow_settled_history)
+            allow_settled_history=allow_settled_history, allow_exhausted_history=allow_exhausted_history)
         prior_status = 'blocked' if allow_settled_history else 'triage'
         changed = conn.execute("UPDATE tasks SET status='archived' WHERE id=? AND status=?",
                                (task_id, prior_status))
@@ -175,5 +184,7 @@ def archive_accepted_artifact(conn, task_id, *, board, expected_revision, eviden
         if allow_settled_history:
             event.update(prior_status='blocked', prior_run_count=len(rows['task_runs']),
                          settled_history_preserved=True)
+        if allow_exhausted_history:
+            event['terminal_budget_history_preserved'] = True
         kb._append_event(conn, task_id, 'archived', event)
     return True
