@@ -25,3 +25,15 @@ The reviewed host must expose `ctx.kanban_readonly_snapshot(board, idempotency_k
 The 8 MiB bound limits the retained/returned encoded projected result, not aggregate original input processed. Original historical data can exceed 8 MiB: this is an intentional expansion from the former all-column snapshot representation, not an unchanged raw-processing cap. Each original and projected row remains at most 1 MiB, enumeration remains at most 10,000 rows, and the one-second deadline covers marker reads and complete enumeration. Filtered matching results retain their separate 1 MiB bound. Board markers have a 64 KiB regular-file bound with stable path/descriptor checks. There is no persistent history cache or blanket trust of old receipts.
 
 There are no feedback-specific core CLI selectors. Old or host-isolated contexts fail closed with no fallback to mutating `list`, `show` or the broad Kanban client. A later release requires source review, qualified host dependency, intact/quiescent legacy state and separately authorized normal-path validation. Offline synthetic tests do not establish actual GitHub access, historical data parseability or restored scheduling.
+
+## Passive diagnostic
+
+`github-pr-feedback diagnose-intake --repository <approved repository>` uses the
+same caller repository binding and forbidden-argument checks as `scan-intake`.
+It checks the registered control root, intake policy, time policy, and passive
+context in order. Failures return fixed phase codes without exception details.
+It never constructs a GitHub client or receipt ledger, scans feedback, or creates
+cards. A successful result is only `passive_checks_passed`: credentials, GitHub,
+receipts and card writes remain unchecked, and historical rejection causes remain
+unknown. Existing context fences and plugin admission still apply. This command
+is explicit; `scan-intake` and scheduled pollers do not invoke it automatically.

@@ -55,6 +55,10 @@ def setup_cli(ctx, parser):
         "scan-intake", help="Read scoped feedback and deliver deduplicated triage cards"
     )
     command.add_argument("--repository", required=True, choices=tuple(SCOPES))
+    diagnostic = commands.add_parser(
+        "diagnose-intake", help="Check passive intake gates without scanning or creating cards"
+    )
+    diagnostic.add_argument("--repository", required=True, choices=tuple(SCOPES))
 
 
 def handle_cli(ctx, args):
@@ -77,11 +81,18 @@ def handle_cli(ctx, args):
         "comment",
         "submit_review",
     )
-    if getattr(args, "github_pr_feedback_action", None) != "scan-intake" or any(
+    action = getattr(args, "github_pr_feedback_action", None)
+    if action not in ("scan-intake", "diagnose-intake") or any(
         getattr(args, key, None) not in (None, False, "") for key in forbidden
     ):
         print(json.dumps({"status": "rejected", "created": 0}))
         return 1
+    if action == "diagnose-intake":
+        from .intake_diagnostic import diagnose_intake
+
+        result = diagnose_intake(ctx, args.repository)
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result["status"] == "passive_checks_passed" else 1
     try:
         control_root = registered_control_root(ctx, SCOPES[args.repository])
         policy = load_intake_policy(ctx, args.repository)
