@@ -14,8 +14,8 @@ delivery: When you find something actionable, create exactly one Kanban task: `h
 HERMES_DEPENDENCY_AUDIT_BODY
 )
 printf '%s' "$body" > "$body_file"
-"$hermes_bin" kanban enqueue-audit \
-  --board default --project p_2a482075 \
+"$hermes_bin" kanban --board default enqueue-audit \
+  --project p_2a482075 \
   --hermes "$hermes_bin" \
   --assignee hermes-maintenance-steward \
   --creator cron-hermes-dependency-health \
