@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { ActionStatus } from '@/components/ui/action-status'
 import { Button } from '@/components/ui/button'
@@ -61,6 +61,7 @@ export function ConfirmDialog({
   const { t } = useI18n()
   const confirmRef = useRef<HTMLButtonElement>(null)
   const closeTimerRef = useRef<null | number>(null)
+  const lifetimeRef = useRef<null | symbol>(null)
   const [status, setStatus] = useState<'done' | 'idle' | 'saving'>('idle')
   const [error, setError] = useState<null | string>(null)
   const busy = status === 'saving' || status === 'done'
@@ -76,53 +77,57 @@ export function ConfirmDialog({
     }
   }, [open])
 
-  // Cancel the pending close timer on unmount. The timer below holds the
-  // "done" beat visible for 600ms, and an unmount inside that window used to
-  // leave it armed. It then called onClose on a tree that is gone, which
-  // reaches setState in the parent. Under vitest the environment can be torn
-  // down first, and React then reads `window` during the update and throws
-  // ReferenceError.
-  // The write below is a timer handle, and not a mirror of a reactive value.
-  // It happens on unmount only, and it clears the handle this component owns.
-  // eslint-disable-next-line no-restricted-syntax
-  useEffect(() => {
+  // Async results belong to one committed open lifetime. Invalidate them at
+  // the commit boundary so unmount or close/reopen cannot revive an old dialog.
+  useLayoutEffect(() => {
+    lifetimeRef.current = open ? Symbol('confirmation') : null
+
     return () => {
+      lifetimeRef.current = null
       if (closeTimerRef.current !== null) {
         window.clearTimeout(closeTimerRef.current)
         closeTimerRef.current = null
       }
     }
-  }, [])
+  }, [open])
 
   async function run() {
-    if (busy) {
+    const lifetime = lifetimeRef.current
+    if (busy || lifetime === null) {
       return
     }
 
     setError(null)
-
-    if (dismissOnConfirm) {
-      try {
-        await onConfirm()
-        onClose()
-      } catch (err) {
-        setError(err instanceof Error ? err.message : t.errors.genericFailure)
-      }
-
-      return
+    if (!dismissOnConfirm) {
+      setStatus('saving')
     }
-
-    setStatus('saving')
 
     try {
       await onConfirm()
+      if (lifetimeRef.current !== lifetime) {
+        return
+      }
+
+      if (dismissOnConfirm) {
+        onClose()
+        return
+      }
+
       setStatus('done')
       closeTimerRef.current = window.setTimeout(() => {
+        if (lifetimeRef.current !== lifetime) {
+          return
+        }
         closeTimerRef.current = null
         onClose()
       }, 600)
     } catch (err) {
-      setStatus('idle')
+      if (lifetimeRef.current !== lifetime) {
+        return
+      }
+      if (!dismissOnConfirm) {
+        setStatus('idle')
+      }
       setError(err instanceof Error ? err.message : t.errors.genericFailure)
     }
   }
