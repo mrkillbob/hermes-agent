@@ -1108,7 +1108,9 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         removed_ids: Optional[list[str]] = None,
         status_cleared_ids: Optional[list[str]] = None,
     ) -> None:
-        # Self-locking: snapshotting self._entries must not race a rotation.
+        from agent.credential_pool_readonly import pool_resolution_is_readonly
+        if pool_resolution_is_readonly(self):
+            return
         with self._lock:
             payloads = [entry.to_dict() for entry in self._entries]
             written = persist_pool_entries(
@@ -2982,7 +2984,6 @@ def load_pool(provider: str) -> CredentialPool:
         auth_mod.heal_forked_single_use_oauth_grants(provider)
     raw_entries = read_credential_pool(provider)
     disk_ids = {e.get("id") for e in raw_entries if isinstance(e, dict) and e.get("id")}
-    # Ownership (auth.json read) after the heal above; re-read at the tail only if _persist() ran.
     owns_provider: Optional[bool] = None
     changed = any(
         isinstance(payload, dict) and sanitize_borrowed_credential_payload(payload, provider) != payload
@@ -3034,16 +3035,15 @@ def load_pool(provider: str) -> CredentialPool:
         changed |= _normalize_pool_priorities(provider, entries)
 
     pool = CredentialPool(provider, entries)
+    from agent.credential_pool_readonly import mark_resolution_pool
+    mark_resolution_pool(pool)
     pool._persisted_token_pairs = auth_mod._token_pairs_by_id(raw_entries)
     if changed:
         pool._persist(removed_ids=sorted(disk_ids - {entry.id for entry in entries}))
     # Remember the root's borrowed rows so a later ``add_entry`` in this
     # profile leaves them out of the profile's own store (#100339).
-    # No disk rows -> nothing borrowed; the ``set()`` default already applies.
     if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and disk_ids:
-        # Reuse the pre-persist ownership answer unless _persist() just rewrote
-        # the store (it can give the profile its own rows); nothing else between
-        # the two checks touches auth.json.
+        # A persist may have changed ownership since the initial read.
         if changed:
             owns_provider = _profile_owns_pool_provider(provider)
         if not owns_provider:

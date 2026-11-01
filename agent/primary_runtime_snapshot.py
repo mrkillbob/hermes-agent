@@ -102,7 +102,8 @@ def restore_primary_runtime(agent) -> bool:
             if not recover_voice_cleanup(agent, lease):
                 raise RuntimeRecoveryPendingError('active runtime recovery is still pending')
         if agent._fallback_activated and agent._primary_runtime is None:
-            return False
+            from agent.startup_primary_recovery import recover_pending_primary
+            return recover_pending_primary(agent, lease)
         return _restore_resolved_primary_runtime(agent, lease)
 
 
@@ -126,6 +127,7 @@ def finish_turn_result(agent, result):
 def commit_runtime_selection(agent, lease):
     """Invalidate only recovery owned by a superseded successful session selection."""
     lease.successful_selection()
+    agent._pending_primary_intent = None
     agent._voice_route_state = None
     agent._turn_route_task = ''
 
