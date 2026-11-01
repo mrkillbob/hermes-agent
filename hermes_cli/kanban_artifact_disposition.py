@@ -83,6 +83,63 @@ def _require_bytes(value, expected):
         raise ValueError('artifact disposition requires exact immutable bounded accepted bytes')
 
 
+def _validate_acceptance(conn, task_id, *, board, expected_revision, evidence,
+                         artifact, provenance, allow_settled_history):
+    """One evidence/hold validator for both observation and guarded mutation."""
+    if (type(evidence) is not ArtifactAcceptance
+            or type(allow_settled_history) is not bool):
+        raise ValueError('explicit artifact acceptance is required')
+    payload = evidence.payload()
+    board = kb._require_slug(board)
+    if (evidence.board, evidence.task_id, evidence.reviewed_revision) != (board, task_id, expected_revision):
+        raise ValueError('artifact acceptance does not match reviewed board/card/revision')
+    _require_bytes(artifact, evidence.artifact_sha256)
+    _require_bytes(provenance, evidence.provenance_sha256)
+    actual = kbc._main_db_file(conn)
+    if actual is None or Path(actual).resolve() != kb.kanban_db_path(board=board).resolve():
+        raise ValueError('artifact disposition connection does not match canonical board')
+    rows = _selected_task_rows(conn, [task_id])
+    require_task_revision(expected_revision, board, task_id, rows)
+    if allow_settled_history:
+        _require_settled_source(rows)
+    else:
+        _require_inactive_intake(rows)
+    if kb._has_sticky_block(conn, task_id):
+        raise ValueError('artifact disposition preserves explicit policy holds')
+    return payload, rows
+
+
+def preview_accepted_artifact(conn, task_id, *, board, expected_revision, evidence,
+                              artifact: bytes, provenance: bytes,
+                              allow_settled_history: bool = False):
+    """Assess the existing artifact-only operation without writing or granting it.
+
+    Uses a deferred read transaction, or the caller's existing snapshot. Opens no
+    connection and does not initialize schema, run cleanup, promote dependencies
+    or invoke hooks. SQLite's normal connection/sidecar requirements still apply.
+    A later archival revalidates everything under its own writer transaction.
+    Retention describes this operation, not a permanent exemption from other GC.
+    """
+    owns_snapshot = not conn.in_transaction
+    if owns_snapshot:
+        conn.execute('BEGIN')
+    try:
+        payload, rows = _validate_acceptance(
+            conn, task_id, board=board, expected_revision=expected_revision,
+            evidence=evidence, artifact=artifact, provenance=provenance,
+            allow_settled_history=allow_settled_history)
+        return {
+            **payload, 'preview_only': True, 'admission_granted': False,
+            'prior_status': rows['tasks'][0]['status'], 'proposed_status': 'archived',
+            'scope': 'artifact_only', 'workspace_retained': True,
+            'readiness_recomputed': False, 'completion_hooks_invoked': False,
+            'runtime_acceptance_claimed': False, 'cleanup_performed': False,
+        }
+    finally:
+        if owns_snapshot and conn.in_transaction:
+            conn.execute('ROLLBACK')
+
+
 def archive_accepted_artifact(conn, task_id, *, board, expected_revision, evidence,
                               artifact: bytes, provenance: bytes, allow_nested: bool = False,
                               allow_settled_history: bool = False):
@@ -98,27 +155,13 @@ def archive_accepted_artifact(conn, task_id, *, board, expected_revision, eviden
     its own guarded transaction to keep store-wide preflight atomic. Its success
     then releases only a savepoint; durability requires the outer commit.
     """
-    if (type(evidence) is not ArtifactAcceptance or type(allow_nested) is not bool
-            or type(allow_settled_history) is not bool):
-        raise ValueError('explicit artifact acceptance is required')
-    payload = evidence.payload()
-    board = kb._require_slug(board)
-    if (evidence.board, evidence.task_id, evidence.reviewed_revision) != (board, task_id, expected_revision):
-        raise ValueError('artifact acceptance does not match reviewed board/card/revision')
-    _require_bytes(artifact, evidence.artifact_sha256)
-    _require_bytes(provenance, evidence.provenance_sha256)
-    actual = kbc._main_db_file(conn)
-    if actual is None or Path(actual).resolve() != kb.kanban_db_path(board=board).resolve():
-        raise ValueError('artifact disposition connection does not match canonical board')
+    if type(allow_nested) is not bool:
+        raise ValueError('allow_nested must be an exact boolean')
     with kb.write_txn(conn, allow_nested=allow_nested):
-        rows = _selected_task_rows(conn, [task_id])
-        require_task_revision(expected_revision, board, task_id, rows)
-        if allow_settled_history:
-            _require_settled_source(rows)
-        else:
-            _require_inactive_intake(rows)
-        if kb._has_sticky_block(conn, task_id):
-            raise ValueError('artifact disposition preserves explicit policy holds')
+        payload, rows = _validate_acceptance(
+            conn, task_id, board=board, expected_revision=expected_revision,
+            evidence=evidence, artifact=artifact, provenance=provenance,
+            allow_settled_history=allow_settled_history)
         prior_status = 'blocked' if allow_settled_history else 'triage'
         changed = conn.execute("UPDATE tasks SET status='archived' WHERE id=? AND status=?",
                                (task_id, prior_status))

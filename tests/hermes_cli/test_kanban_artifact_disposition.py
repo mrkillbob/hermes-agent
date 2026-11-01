@@ -302,3 +302,88 @@ def test_artifact_disposition_preserves_ownership_dependencies_and_holds(case, c
         with pytest.raises(ValueError):
             _apply(api, conn, case, _decision(api, case, revision))
         assert _selected_task_rows(conn, [case]) == before
+
+
+def test_acceptance_preview_uses_read_only_connection_and_preserves_all_rows(case):
+    api = _api()
+    with connect_closing(board=BOARD) as conn:
+        before = _selected_task_rows(conn, [case])
+        revision = task_revision(BOARD, case, before)
+    with sqlite3.connect(kb.kanban_db_path(board=BOARD).as_uri() + '?mode=ro', uri=True) as reader:
+        reader.row_factory = sqlite3.Row
+        reader.execute('PRAGMA query_only=ON')
+        decision = _decision(api, case, revision)
+        result = api.preview_accepted_artifact(
+            reader, case, board=BOARD, expected_revision=revision, evidence=decision,
+            artifact=ARTIFACT, provenance=PROVENANCE)
+        assert result['preview_only'] is True
+        assert result['admission_granted'] is False
+        assert result['workspace_retained'] is True
+        assert result['readiness_recomputed'] is False
+        assert result['proposed_status'] == 'archived'
+        assert not reader.in_transaction
+        assert _selected_task_rows(reader, [case]) == before
+    reader.close()
+
+
+def test_preview_is_not_a_cached_permission_to_archive(case):
+    api = _api()
+    with connect_closing(board=BOARD) as conn:
+        revision = task_revision(BOARD, case, _selected_task_rows(conn, [case]))
+        decision = _decision(api, case, revision)
+        kwargs = dict(board=BOARD, expected_revision=revision, evidence=decision,
+                      artifact=ARTIFACT, provenance=PROVENANCE)
+        api.preview_accepted_artifact(conn, case, **kwargs)
+        kb.add_comment(conn, case, 'owner', 'New evidence needs review')
+        before = _selected_task_rows(conn, [case])
+        with pytest.raises(ValueError, match='revision changed'):
+            api.preview_accepted_artifact(conn, case, **kwargs)
+        with pytest.raises(ValueError, match='revision changed'):
+            api.archive_accepted_artifact(conn, case, **kwargs)
+        assert _selected_task_rows(conn, [case]) == before
+
+
+@pytest.mark.skipif(not hasattr(sqlite3, 'LEGACY_TRANSACTION_CONTROL'),
+                    reason='sqlite3 autocommit keyword requires Python 3.12+')
+@pytest.mark.parametrize('refuse', [False, True])
+def test_preview_closes_its_explicit_snapshot_in_autocommit_mode(case, refuse):
+    api = _api()
+    reader = sqlite3.connect(kb.kanban_db_path(board=BOARD).as_uri() + '?mode=ro',
+                             uri=True, autocommit=True)
+    try:
+        reader.row_factory = sqlite3.Row
+        revision = task_revision(BOARD, case, _selected_task_rows(reader, [case]))
+        decision = _decision(api, case, revision)
+        kwargs = dict(board=BOARD, expected_revision=revision, evidence=decision,
+                      artifact=b'changed' if refuse else ARTIFACT, provenance=PROVENANCE)
+        if refuse:
+            with pytest.raises(ValueError):
+                api.preview_accepted_artifact(reader, case, **kwargs)
+        else:
+            api.preview_accepted_artifact(reader, case, **kwargs)
+        assert not reader.in_transaction
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize('refuse', [False, True])
+def test_preview_preserves_callers_transaction(case, refuse):
+    api = _api()
+    with connect_closing(board=BOARD) as conn:
+        conn.execute('BEGIN')
+        try:
+            kb.add_comment(conn, case, 'owner', 'pending caller change')
+            revision = task_revision(BOARD, case, _selected_task_rows(conn, [case]))
+            decision = _decision(api, case, revision)
+            before = _selected_task_rows(conn, [case])
+            kwargs = dict(board=BOARD, expected_revision=revision, evidence=decision,
+                          artifact=b'changed' if refuse else ARTIFACT, provenance=PROVENANCE)
+            if refuse:
+                with pytest.raises(ValueError):
+                    api.preview_accepted_artifact(conn, case, **kwargs)
+            else:
+                api.preview_accepted_artifact(conn, case, **kwargs)
+            assert conn.in_transaction
+            assert _selected_task_rows(conn, [case]) == before
+        finally:
+            conn.execute('ROLLBACK')
