@@ -39,6 +39,8 @@ def validate_action(operation, payload):
         return
     if operation in {'delete', 'reset'} and not payload:
         return
+    if operation == 'delete' and set(payload) == {'only_if_empty'} and payload['only_if_empty'] is True:
+        return
     if operation == 'import' and set(payload) == {'sessions'} and isinstance(payload['sessions'], list):
         return
     if (operation == 'rewind' and 'target_message_id' in payload

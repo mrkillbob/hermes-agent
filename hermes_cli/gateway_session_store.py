@@ -287,7 +287,7 @@ class GatewaySessionStore:
             state.subscription_id = None
         return subscription
 
-    def delete_session(self, session_id, sessions_dir=None):
+    def delete_session(self, session_id, sessions_dir=None, *, only_if_empty=False):
         self.snapshots.pop(session_id, None)
         snapshot = self.call("session.resume", session_id=session_id)
         # The owner answers and subscribes under the id it resolved the read to (a compression
@@ -296,7 +296,7 @@ class GatewaySessionStore:
         state = self.connection.states.get(resolved)
         held = state is not None and state.subscription_id is not None
         try:
-            self._mutate(session_id, "delete", {}, snapshot)
+            self._mutate(session_id, "delete", {"only_if_empty": True} if only_if_empty else {}, snapshot)
         except GatewayClientError:
             # Hand back only the attachment the read made, with a plain detach: an end_reason would
             # run the owner's viewer close (fencing the session's delegations, ending it at idle).
@@ -336,7 +336,7 @@ class GatewaySessionStore:
 
     def delete_session_if_empty(self, session_id, sessions_dir=None):
         """Main's quit-immediately prune, as a gateway delete: only a row with no messages, no title
-        and no children (checked on the read-only reader; the gateway deletes the lineage)."""
+        and no children. The reader is a prefilter; the owner rechecks inside its delete transaction."""
         db = self._db()
         if db is None:
             return False
@@ -353,7 +353,7 @@ class GatewaySessionStore:
         if not empty:
             return False
         try:
-            return self.delete_session(session_id)
+            return self.delete_session(session_id, only_if_empty=True)
         except GatewayClientError as exc:
             logger.debug("empty session prune refused: %s", exc)
             return False

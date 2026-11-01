@@ -259,8 +259,11 @@ def retire_prunable(conn, session_ids):
 
 
 def delete_in_transaction(db, conn, session_id, payload):
+    from hermes_state_empty import session_is_empty
     from hermes_state_mutation_guards import require_idle, delete_targets
     targets = delete_targets(conn, session_id)
+    if payload.get('only_if_empty') and (targets != [session_id] or not session_is_empty(conn, session_id)):
+        raise RuntimeStoreError('revision_conflict')
     require_idle(db, conn, targets)
     retire_sessions(conn, targets)
     for sid in targets:
