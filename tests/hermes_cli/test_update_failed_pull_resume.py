@@ -81,7 +81,9 @@ def _isolate_pipeline(monkeypatch, root, token, resume, failed_pull):
 
 
 @pytest.mark.usefixtures("no_external_work")
-@pytest.mark.parametrize("verdict", ["restored-verified", "restored-unverified", "torn"])
+@pytest.mark.parametrize("verdict", [
+    "restored-verified", "restored-unverified", "torn", "already-settled",
+])
 def test_failed_pull_settles_pause_before_releasing_command_custody(
     tmp_path, monkeypatch, verdict
 ):
@@ -117,6 +119,10 @@ def test_failed_pull_settles_pause_before_releasing_command_custody(
         # The checkout boundary settles its attempted restoration before exit 1.
         state["settled"] = True
         events.append("settle-tree")
+        if verdict == "already-settled":
+            token["resume_needed"] = False
+            token["profiles"] = {}
+            stored.clear()
         raise SystemExit(1)
 
     def whole_tree(resume_token):
@@ -179,6 +185,14 @@ def test_failed_pull_settles_pause_before_releasing_command_custody(
 
     assert error.value.code == 1
     assert len(registered) == 1
+    if verdict == "already-settled":
+        assert observations == []
+        assert events == ["acquire-checkout", "settle-tree", "release-checkout"]
+        assert writes == discharged == followups == []
+        assert stored == {}
+        assert state["checkout_held"] is False
+        return
+
     assert observations == [{"checkout_held": True, "tree_settled": True}]
     assert events.index("settle-tree") < events.index("guarded-resume")
     assert events.index("guarded-resume") < events.index("release-checkout")
