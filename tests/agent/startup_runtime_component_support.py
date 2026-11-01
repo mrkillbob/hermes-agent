@@ -139,7 +139,12 @@ def real_components(tmp_path_factory, request):
 
 def routed_agent(real_components, monkeypatch, primary_available):
     init, snapshot, auxiliary, fallback_config = real_components
-    agent = SimpleNamespace(
+    from agent.status_output import StatusOutputMixin
+
+    class ComponentAgent(StatusOutputMixin, SimpleNamespace):
+        pass
+
+    agent = ComponentAgent(
         provider="openai", requested_provider="openai", model="primary-model",
         base_url=PRIMARY_URL, api_mode="chat_completions", api_key="",
         _client_kwargs={"api_key": "", "base_url": PRIMARY_URL},
@@ -173,6 +178,7 @@ def routed_agent(real_components, monkeypatch, primary_available):
     monkeypatch.setattr(auxiliary, "resolve_provider_client", resolver)
     monkeypatch.setattr(fallback_config, "resolve_entry_api_key", entry_key)
     kwargs = init._routed_client_kwargs(agent, [fallback], 10)
+    assert bool(getattr(agent, "_pending_fallback_notice", None)) is (not primary_available)
     # Explicit assignment boundary from _init_openai_client; no client creation.
     agent._client_kwargs = kwargs
     agent.api_key = kwargs["api_key"]

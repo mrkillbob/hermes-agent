@@ -11,9 +11,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent.status_output import StatusOutputMixin
+
+
+class _Agent(StatusOutputMixin, SimpleNamespace):
+    """Exercise the real notice buffer used by successful startup fallback."""
+
 
 def _agent(provider="openrouter"):
-    return SimpleNamespace(
+    return _Agent(
         provider=provider,
         model="z-ai/glm-5.3-flash",
         base_url=None,
@@ -118,3 +124,8 @@ def test_recovered_ladder_does_not_warn(monkeypatch, caplog):
     assert agent.provider == "kimi"
     assert agent._fallback_activated
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    notices = agent._pending_fallback_notice
+    assert len(notices) == 1
+    assert "openrouter" in notices[0]
+    assert "kimi" in notices[0]
+    assert agent._retry_status_buffer == [("status", notices[0])]
