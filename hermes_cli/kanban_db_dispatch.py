@@ -322,8 +322,9 @@ def _pid_alive(pid: Optional[int]) -> bool:
 
     Zombies (exited, not yet reaped) still pass the existence check, so a
     worker would look "alive" forever between exit and reap. Linux: peek at
-    ``/proc/<pid>/status`` and treat ``State: Z`` as dead; macOS: ask ``ps``
-    for the BSD ``stat`` field and treat ``Z`` as dead.
+    ``/proc/<pid>/status`` and treat ``State: Z`` as dead. On macOS the shared
+    ``_pid_exists`` probe already uses psutil for zombie status without spawning
+    a child. If status is unavailable its existence fallback remains conservative.
     """
     if not pid or pid <= 0:
         return False
@@ -341,23 +342,6 @@ def _pid_alive(pid: Optional[int]) -> bool:
                         break
         except (FileNotFoundError, PermissionError, OSError):
             # proc entry gone → already reaped; treat as dead.
-            pass
-    elif sys.platform == "darwin":
-        try:
-            proc = subprocess.run(
-                ["ps", "-o", "stat=", "-p", str(int(pid))],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True, encoding='utf-8', errors='replace',
-                timeout=1,
-                check=False,
-            )
-            if proc.returncode != 0:  # A failed ps is inconclusive; recheck for exit.
-                return _pid_exists(int(pid))
-            if "Z" in (proc.stdout or "").strip():
-                return False
-        except (OSError, subprocess.SubprocessError, TimeoutError):
-            # If the secondary probe fails, keep the kill(0) answer.
             pass
     return True
 
