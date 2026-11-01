@@ -19,7 +19,7 @@ from hermes_cli import (
     update_receipt,
     update_stage,
 )
-from tests.compat.old_updater_support import no_external_work
+from tests.compat.old_updater_support import no_external_work as no_external_work
 
 
 def _noop(*args, **kwargs):
@@ -80,9 +80,10 @@ def _isolate_pipeline(monkeypatch, root, token, resume, failed_pull):
     monkeypatch.setattr(update_cmd, "_apply_pulled_update", unexpected_completion)
 
 
+@pytest.mark.usefixtures("no_external_work")
 @pytest.mark.parametrize("verdict", ["restored-verified", "restored-unverified", "torn"])
 def test_failed_pull_settles_pause_before_releasing_command_custody(
-    tmp_path, monkeypatch, no_external_work, verdict
+    tmp_path, monkeypatch, verdict
 ):
     events = []
     state = {"checkout_held": False, "settled": False}
