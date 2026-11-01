@@ -36,7 +36,7 @@ def test_adoption_is_read_only_and_refuses_unsupported_state(owned_auth, case):
     from tests.hermes_cli.test_auth_nous_provider import _invoke_jwt
     home, store = owned_auth
     state = store['providers']['nous']
-    row = dict(source='device_code', access_token=state['access_token'], last_status='ok')
+    row = dict(source='device_code', access_token=state['access_token'], scope=state['scope'], last_status='ok')
     store['credential_pool'] = {'nous': [row]}
     from tests.hermes_cli.test_auth_nous_provider import _jwt_with_claims
 

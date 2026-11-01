@@ -1,7 +1,8 @@
 """Recover an unresolved startup primary without treating its fallback as a snapshot.
 
 Only canonical API-key built-ins using chat completions at a fixed SDK endpoint qualify. Custom entries,
-aliases, auto, native-auth and virtual routes retain their existing behavior.
+aliases, auto and virtual routes retain their existing behavior. Nous has a separate
+profile-owned, already-valid credential adoption path; it never refreshes authentication.
 """
 from __future__ import annotations
 
@@ -25,6 +26,9 @@ def pending_primary_intent(agent):
     if (not agent.provider or getattr(agent, 'requested_provider', None) != agent.provider or agent.base_url
             or getattr(agent, 'api_mode', None) != 'chat_completions' or not agent.model):
         return None
+    if agent.provider == 'nous':
+        from agent.startup_nous_adoption import pending_nous_intent
+        return pending_nous_intent(agent)
     definition = _qualified_definition(agent.provider)
     return (PrimaryIntent(agent.provider, agent.model, definition.base_url.rstrip('/'), agent.api_mode)
             if definition is not None else None)
@@ -90,7 +94,7 @@ class PreparedPrimary:
     compressor_state: dict
     writes: _DeferredWrites
 
-    def install(self, agent):
+    def install(self, agent, *, flush=True):
         # Preparation ran all fallible calculations/callbacks. These are plain dict
         # publications under the runtime lease; retain the existing compressor object.
         old_fields = dict(agent.__dict__)
@@ -104,10 +108,14 @@ class PreparedPrimary:
             agent.context_compressor.__dict__.clear()
             agent.context_compressor.__dict__.update(old_compressor)
             raise
-        self.writes.flush()
+        if flush:
+            self.writes.flush()
 
 
-def _prepare_primary(agent, intent, client):
+_LOAD_POOL = object()
+
+
+def _prepare_primary(agent, intent, client, *, credential_pool=_LOAD_POOL):
     from agent.agent_init import _client_kwargs_from_routed, config_context_length_for_runtime
     from agent.context_compressor import ContextCompressor
     from agent.primary_runtime_snapshot import _build_primary_runtime_snapshot
@@ -150,7 +158,7 @@ def _prepare_primary(agent, intent, client):
     staged._config_context_length = config_context_length_for_runtime(staged, config)
     staged.reasoning_config = resolve_reasoning_config(config, intent.model)
     staged._reasoning_echo_flag = staged._read_reasoning_echo_from_config()
-    staged._credential_pool = load_pool(intent.provider)
+    staged._credential_pool = load_pool(intent.provider) if credential_pool is _LOAD_POOL else credential_pool
     staged._credential_pool_entry_id = None
     sync_credential_pool_entry_id(staged)
     staged.request_overrides = dict(getattr(agent, 'request_overrides', {}) or {})
@@ -185,6 +193,9 @@ def recover_pending_primary(agent, lease):
     with lease.controller.mutex:
         lease._check_owner_locked()
     intent = getattr(agent, '_pending_primary_intent', None)
+    from agent.startup_nous_adoption import NousPrimaryIntent, recover_nous_adoption
+    if isinstance(intent, NousPrimaryIntent):
+        return recover_nous_adoption(agent, lease, profile_home=intent.profile_home, model=intent.model)
     if not isinstance(intent, PrimaryIntent):
         return False
     from agent.auxiliary_client import resolve_provider_client

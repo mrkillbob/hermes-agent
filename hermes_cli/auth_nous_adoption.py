@@ -21,6 +21,7 @@ class NousAdoption:
     model: str
     api_key: str = field(repr=False)
     generation: str = field(repr=False)
+    pool_row_json: str = field(default='', repr=False)
     base_url: str = DEFAULT_NOUS_INFERENCE_URL
 
 
@@ -37,6 +38,8 @@ def _eligible_pool(store, state, model):
     if (entry.get('source') != 'device_code' or entry.get('last_status') not in (None, 'ok')
             or entry.get('access_token') != state.get('access_token')
             or entry.get('agent_key') != state.get('agent_key')):
+        return False
+    if any(entry.get(key) != state.get(key) for key in ('scope', 'expires_at', 'agent_key_expires_at')):
         return False
     cooldowns = entry.get('model_cooldowns', {}) or {}
     if not isinstance(cooldowns, dict):
@@ -90,7 +93,9 @@ def prepare_nous_adoption(*, profile_home: Path, model: str):
         token = state.get(token_key)
         if isinstance(token, str) and not is_anonymous_request('nous', token) and _nous_invoke_jwt_is_usable(
                 token, scope=state.get('scope'), expires_at=state.get(expiry_key)):
-            return NousAdoption(owner, model, token, hashlib.sha256(raw).hexdigest())
+            rows = store.get('credential_pool', {}).get('nous', [])
+            row_json = json.dumps(rows[0], sort_keys=True) if rows else ''
+            return NousAdoption(owner, model, token, hashlib.sha256(raw).hexdigest(), row_json)
     return None
 
 
@@ -98,3 +103,20 @@ def adoption_is_current(candidate: NousAdoption) -> bool:
     """Revalidate ownership, eligibility, expiry and store generation; never refresh."""
     current = prepare_nous_adoption(profile_home=Path(candidate.profile_home), model=candidate.model)
     return current is not None and current == candidate
+
+
+def commit_current_adoption(candidate, publish):
+    """Fence a prepared dictionary publication against cooperating auth writers.
+
+    The caller holds its runtime reservation, not its bookkeeping mutex. Publication
+    must neither acquire a pool lock nor run persistence/client callbacks.
+    """
+    from hermes_cli.auth import _auth_store_lock
+    from hermes_constants import get_hermes_home, hermes_home_key
+    if hermes_home_key(get_hermes_home()) != candidate.profile_home:
+        return False
+    with _auth_store_lock(timeout_seconds=0.0):
+        if not adoption_is_current(candidate):
+            return False
+        publish()
+        return True
