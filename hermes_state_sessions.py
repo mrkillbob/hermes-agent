@@ -1795,25 +1795,8 @@ class SessionSessionsMixin:
         row whose first turn is already leased but not yet flushed would be deleted mid-turn
         (#123583). A guarded row is simply not deleted (returns ``False``), like any non-empty row."""
         def _do(conn):
-            from hermes_state_local import owned_lineage_ids
-            if self._guarded_ids(conn, [session_id]) or owned_lineage_ids(conn, session_id) != [session_id]:
-                return False  # an empty reset tip is still its conversation's current target
-            eligible = conn.execute(
-                """
-                SELECT 1 FROM sessions
-                WHERE id = ?
-                  AND title IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM messages WHERE messages.session_id = sessions.id
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM sessions child
-                      WHERE child.parent_session_id = sessions.id
-                  )
-                """,
-                (session_id,),
-            ).fetchone()
-            if eligible is None:
+            from hermes_state_empty import session_is_empty
+            if self._guarded_ids(conn, [session_id]) or not session_is_empty(conn, session_id):
                 return False
             # Same BEGIN IMMEDIATE transaction as the check above: retire the ledger rows
             # (ON DELETE RESTRICT) and delete without re-evaluating eligibility. Housekeeping, not
