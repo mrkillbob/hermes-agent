@@ -90,8 +90,14 @@ def offline_runtime(tmp_path, monkeypatch):
 
 
 @pytest.mark.real_retry_backoff
-@pytest.mark.parametrize("primary_available", [False, True], ids=["unavailable-primary", "resolved-primary"])
-def test_real_constructor_and_next_turn_preserve_runtime_identity(offline_runtime, monkeypatch, primary_available):
+@pytest.mark.parametrize("primary_available,primary_recovers,secret_policy", [
+    (False, False, "process"), (True, False, "process"), (False, True, "process"),
+    (False, True, "frozen"), (False, True, "refreshed"),
+], ids=["unavailable-primary", "resolved-primary", "primary-recovers-after-startup",
+        "frozen-scope-refuses-global-credential", "refreshed-scope-recovers-primary"])
+def test_real_constructor_and_next_turn_preserve_runtime_identity(
+    offline_runtime, monkeypatch, primary_available, primary_recovers, secret_policy,
+):
     home, requests = offline_runtime
     if primary_available:
         monkeypatch.setenv("OPENAI_API_KEY", "synthetic-primary-key")
@@ -100,7 +106,8 @@ def test_real_constructor_and_next_turn_preserve_runtime_identity(offline_runtim
     from hermes_constants import get_hermes_home
     from run_agent import AIAgent
     from hermes_state import SessionDB
-    from agent.secret_scope import get_secret
+    from agent.secret_scope import get_secret, set_secret_scope, reset_secret_scope
+    from agent.secret_scope import set_multiplex_context, reset_multiplex_context
     from hermes_cli.fallback_config import resolve_entry_api_key
     from hermes_cli.auth import PROVIDER_REGISTRY
 
@@ -113,9 +120,16 @@ def test_real_constructor_and_next_turn_preserve_runtime_identity(offline_runtim
         assert get_secret("OPENAI_API_KEY") == "synthetic-primary-key"
     database = SessionDB(db_path=home / "state.db")
     agent = None
+    scope_tokens = []
+    multiplex_token = None
+    effective_recovery = primary_recovers and secret_policy != "frozen"
     try:
+        if secret_policy != "process":
+            multiplex_token = set_multiplex_context(True)
+            scope_tokens.append(set_secret_scope({"SYNTHETIC_FALLBACK_API_KEY": "synthetic-fallback-key"},
+                                                  profile_home=str(home)))
         agent = AIAgent(session_db=database, provider="openai-api", model="gpt-4.1-mini", fallback_model=fallback,
-                        api_mode="chat_completions" if primary_available else "codex_responses",
+                        api_mode="chat_completions" if primary_available or primary_recovers else "codex_responses",
                     enabled_toolsets=[], skip_memory=True, skip_context_files=True,
                     skip_background_review=True, quiet_mode=True, max_iterations=1,
                     save_trajectories=False, checkpoints_enabled=False, cwd=str(home))
@@ -132,20 +146,43 @@ def test_real_constructor_and_next_turn_preserve_runtime_identity(offline_runtim
         assert agent.api_mode == "chat_completions"
         active_client = agent.client
         history = None
-        for text in ("first synthetic turn", "next synthetic turn"):
+        for turn, text in enumerate(("first synthetic turn", "next synthetic turn")):
+            if turn == 1 and primary_recovers:
+                monkeypatch.setenv("OPENAI_API_KEY", "synthetic-primary-key")
+                if secret_policy == "refreshed":
+                    scope_tokens.append(set_secret_scope({
+                        "SYNTHETIC_FALLBACK_API_KEY": "synthetic-fallback-key",
+                        "OPENAI_API_KEY": "synthetic-primary-key",
+                    }, profile_home=str(home)))
+                from agent.auxiliary_client import resolve_provider_client
+                recovered_client, _ = resolve_provider_client(
+                    "openai-api", model="gpt-4.1-mini", raw_codex=True,
+                )
+                if effective_recovery:
+                    assert recovered_client is not None, "primary resolver has not actually recovered"
+                    assert recovered_client.api_key == "synthetic-primary-key"
+                    recovered_client.close()
+                else:
+                    assert recovered_client is None, "frozen scope escaped to a global credential"
             result = agent.run_conversation(text, system_message="Answer briefly.", conversation_history=history)
             assert result.get("failed") is not True, result
             assert result["final_response"] == "Synthetic response."
             history = result["messages"]
-            if not primary_available:
+            if not primary_available and not (turn == 1 and effective_recovery):
                 assert agent._primary_runtime is None
                 assert agent.client is active_client
                 assert agent._fallback_activated is True
         expected = ("https://api.openai.com/v1/chat/completions", "gpt-4.1-mini", "Bearer synthetic-primary-key") \
             if primary_available else ("https://fallback.invalid/v1/chat/completions", "deepseek-flash",
                                        "Bearer synthetic-fallback-key")
-        assert [(r["url"], r["model"], r["authorization"]) for r in requests] == [expected, expected]
-        if primary_available:
+        recovered = ("https://api.openai.com/v1/chat/completions", "gpt-4.1-mini", "Bearer synthetic-primary-key")
+        assert [(r["url"], r["model"], r["authorization"]) for r in requests] == [
+            expected, recovered if effective_recovery else expected,
+        ]
+        assert [m for m in requests[0]["messages"] if m["role"] == "system"] == [
+            m for m in requests[1]["messages"] if m["role"] == "system"
+        ], "automatic recovery changed the cached system prompt"
+        if primary_available or effective_recovery:
             assert agent._fallback_activated is False
             assert agent.provider == "openai-api"
         import run_agent
@@ -155,6 +192,14 @@ def test_real_constructor_and_next_turn_preserve_runtime_identity(offline_runtim
         for module in (run_agent, init_module, snapshot_module):
             assert Path(module.__file__).resolve().is_relative_to(root)
     finally:
-        if agent is not None:
-            agent.close()
-        database.close()
+        try:
+            if agent is not None:
+                agent.close()
+        finally:
+            try:
+                database.close()
+            finally:
+                for token in reversed(scope_tokens):
+                    reset_secret_scope(token)
+                if multiplex_token is not None:
+                    reset_multiplex_context(multiplex_token)

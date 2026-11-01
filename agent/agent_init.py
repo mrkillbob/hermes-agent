@@ -786,10 +786,10 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
     # No credentials: try the fallback chain BEFORE failing (an exhausted single-entry pool
     # must not die with a misleading "No LLM provider configured"); only explicitly named
     # providers keep the missing-key diagnostic.
-    # An exhausted single-entry pool (typically ``openrouter`` under free-tier daily quotas) must still
-    # reach the chain instead of dying at init with a misleading "No LLM provider configured" error. See
-    # #17929.
+    # Exhausted single-entry pools must still reach the fallback chain (#17929).
     _explicit = (agent.provider or "").strip().lower()
+    from agent.startup_primary_recovery import pending_primary_intent
+    agent._pending_primary_intent = pending_primary_intent(agent)
     _refused_entries = []
     for _fb in _fallback_entries(fallback_model):
         _fb_provider = str(_fb["provider"])
