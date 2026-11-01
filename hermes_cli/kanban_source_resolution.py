@@ -23,7 +23,7 @@ _TERMINAL_RUNS = frozenset(('done', 'completed', 'blocked', 'crashed', 'timed_ou
                            'spawn_failed', 'gave_up'))
 
 
-def _require_settled_source(rows):
+def _require_inactive_settled_history(rows):
     task = rows['tasks'][0]
     ownership = ('claim_lock', 'claim_expires', 'worker_pid', 'worker_started_at',
                  'current_run_id')
@@ -48,7 +48,11 @@ def _require_settled_source(rows):
             if (not isinstance(value, dict) or value.get('sticky') or value.get('local_privacy_denial')
                     or value.get('failure_class') == 'provider_egress_blocked'):
                 raise ValueError('source resolution preserves policy holds')
-    if task.get('last_heartbeat_at') is not None:
+
+
+def _require_settled_source(rows):
+    _require_inactive_settled_history(rows)
+    if rows['tasks'][0].get('last_heartbeat_at') is not None:
         require_historical_heartbeat(rows, _TERMINAL_RUNS, int(kb.time.time()))
 
 
