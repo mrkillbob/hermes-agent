@@ -1027,6 +1027,7 @@ class SessionDB(
 
     def _execute_write(
         self, fn: Callable[[sqlite3.Connection], T], patience_s: Optional[float] = None,
+        *, _commit_guard=None,
     ) -> T:
         """Run *fn(conn)* inside BEGIN IMMEDIATE with jittered lock retry; commit
         is handled here (callers must not commit). Returns *fn*'s result.
@@ -1066,7 +1067,8 @@ class SessionDB(
                     try:
                         fn_started = True
                         result = fn(self._conn)
-                        self._conn.commit()
+                        from hermes_state_commit_guard import commit_transaction
+                        commit_transaction(self._conn, _commit_guard)
                     except BaseException:
                         try:
                             self._conn.rollback()
