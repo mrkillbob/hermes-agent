@@ -7,10 +7,50 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
-from hermes_cli.kanban_inspect import inspect_tasks, main
+from hermes_cli.kanban_inspect import inspect_census, inspect_tasks, main
 from hermes_cli.kanban_task_revision import task_revision
 from hermes_cli.kanban_transfer import _selected_task_rows
 from hermes_cli.sqlite_readonly import readonly_snapshot
+
+
+def test_census_counts_states_without_initialization_or_card_content(tmp_path, monkeypatch, capsys):
+    path = tmp_path / 'board.db'
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute('CREATE TABLE tasks(status TEXT, body TEXT)')
+        conn.executemany('INSERT INTO tasks VALUES (?, ?)', [
+            (status, 'private body must not be emitted')
+            for status in ('done', 'done', 'blocked', 'triage', 'in_progress', 'archived')])
+        conn.commit()
+    before = path.read_bytes()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('census must not initialize or migrate')
+
+    monkeypatch.setattr(kbc, '_open_configured', forbidden)
+    assert main(['--database', str(path), '--board', 'default', '--census']) == 0
+    output = capsys.readouterr().out
+    result = json.loads(output)
+    assert result['counts'] == dict(done=2, blocked=1, triage=1, in_progress=1, archived=1)
+    assert result['total'] == 6
+    assert result['non_archived'] == 5
+    assert result['admission_granted'] is False
+    assert 'private body' not in output
+    assert path.read_bytes() == before
+
+
+def test_census_missing_store_never_creates_it(tmp_path):
+    path = tmp_path / 'missing.db'
+    with pytest.raises((OSError, sqlite3.Error)):
+        inspect_census(path, 'default')
+    assert not path.exists()
+
+
+def test_census_and_card_selection_are_mutually_exclusive(tmp_path):
+    path = tmp_path / 'missing.db'
+    with pytest.raises(SystemExit) as error:
+        main(['--database', str(path), '--board', 'default', '--census', 't_12345678'])
+    assert error.value.code == 2
+    assert not path.exists()
 
 
 def test_inspects_two_cards_without_initializing_or_disposing(tmp_path, monkeypatch, capsys):
