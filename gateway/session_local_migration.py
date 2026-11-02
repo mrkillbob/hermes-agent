@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 from gateway.config import Platform
-from gateway.session import SessionEntry, SessionSource
+from gateway.session import SessionEntry
 from gateway.session_contract import SessionRef
 from hermes_state_runtime import RuntimeStoreError
 
@@ -26,11 +26,15 @@ def bind_native_transport(authority, actor, identity):
             and 'session:create' in actor.capabilities):
         if not hasattr(authority, '_native_legacy_transports'):
             authority._native_legacy_transports = {}
-        authority._native_legacy_transports[actor.transport_id] = actor
+        from gateway.session_native_commit import native_registration_change
+        with native_registration_change(authority, actor):
+            authority._native_legacy_transports[actor.transport_id] = actor
 
 
 def unbind_native_transport(authority, actor):
-    getattr(authority, '_native_legacy_transports', {}).pop(actor.transport_id, None)
+    from gateway.session_native_commit import native_registration_change
+    with native_registration_change(authority, actor):
+        getattr(authority, '_native_legacy_transports', {}).pop(actor.transport_id, None)
 
 
 def require_history_claim(authority, conn, actor, sid):
