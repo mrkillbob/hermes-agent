@@ -2,11 +2,12 @@
 
 import { type ToolCallMessagePartProps, useAuiState } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
+import { computed } from 'nanostores'
 import { useMemo, useState } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
 import { ToolFallback } from '@/components/assistant-ui/tool/fallback'
-import type { TimelinePartMetadata } from '@/lib/chat-messages'
+import { QUESTION_CARD_TOOLS, type TimelinePartMetadata } from '@/lib/chat-messages'
 import { $settledClarifyResults, type ClarifyRequest, sessionClarifyRequest } from '@/store/clarify'
 
 import { selectMessageRunning } from '../tool/fallback-model'
@@ -39,14 +40,20 @@ const requestIdByToolCall = new Map<string, string>()
 // when the gateway asks a batch one card per question on the same row. Every
 // other row it saw is history, including an earlier call or a duplicated copy
 // that asks the same question. A row no re-arm has seen follows a request its
-// own args cover.
-function ownsRequest(request: ClarifyRequest | null, row: ClarifyToolProps, args: ClarifyArgs): boolean {
+// own args cover only while the transcript has no explicitly bound owner.
+function ownsRequest(request: ClarifyRequest | null, row: ClarifyToolProps, args: ClarifyArgs, hasBoundOwner: boolean): boolean {
   if (!request) {
     return false
   }
 
   if (row.clarifyRequestId !== undefined) {
     return row.clarifyRequestId === request.requestId
+  }
+
+  // Hydration can append a matching row after the re-arm bound the owner.
+  // That late row must not claim the request through the legacy text fallback.
+  if (hasBoundOwner) {
+    return false
   }
 
   const asked = new Set((args.questions ?? []).map(entry => entry.question.trim()))
@@ -57,9 +64,19 @@ function ownsRequest(request: ClarifyRequest | null, row: ClarifyToolProps, args
 function ClarifyToolLive(props: ClarifyToolProps) {
   // The tool row is in whichever session's transcript rendered it — read THAT
   // session's clarify (primary or tile), not the globally-active one.
-  const sessionId = useStore(useSessionView().$runtimeId)
+  const view = useSessionView()
+  const sessionId = useStore(view.$runtimeId)
   const $request = useMemo(() => sessionClarifyRequest(sessionId), [sessionId])
   const request = useStore($request)
+
+  const $hasBoundOwner = useMemo(() => computed([view.$messages, $request], (messages, pending) =>
+    Boolean(pending && messages.some(message => message.parts.some(part =>
+      part.type === 'tool-call' && QUESTION_CARD_TOOLS.has(part.toolName) &&
+      part.result === undefined && part.clarifyRequestId === pending.requestId
+    )))
+  ), [view.$messages, $request])
+
+  const hasBoundOwner = useStore($hasBoundOwner)
   const fromArgs = useMemo(() => readClarifyArgs(props.args), [props.args])
   const messageRunning = useAuiState(selectMessageRunning)
   const messageId = useAuiState(s => s.message.id)
@@ -69,7 +86,7 @@ function ClarifyToolLive(props: ClarifyToolProps) {
   // the request and must still collapse an unanswered card.
   const [answered, setAnswered] = useState(false)
   const settledResults = useStore($settledClarifyResults)
-  const owner = ownsRequest(request, props, fromArgs)
+  const owner = ownsRequest(request, props, fromArgs, hasBoundOwner)
 
   if (request && owner) {
     requestIdByToolCall.set(rowKey, request.requestId)
@@ -110,6 +127,7 @@ function ClarifyToolLive(props: ClarifyToolProps) {
       fromArgs={fromArgs}
       onAnswered={() => setAnswered(true)}
       request={owner ? request : null}
+      rowIdentity={{ sessionId: sessionId ?? '', messageId, toolCallId: props.toolCallId, binding: props.clarifyRequestId }}
       undelivered={undelivered}
     />
   )
