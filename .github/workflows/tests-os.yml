@@ -208,7 +208,7 @@ jobs:
           # ``-m`` — "must never pass without running its OS's tests").
           SEPARATOR="$(python -c 'import os, sys; sys.stdout.write(os.pathsep)')"
           FILES="$(tr -d '\r' < "$LIST" | paste -sd "$SEPARATOR" -)"
-          scripts/run_tests.sh --files "$FILES" -- \
+          scripts/run_tests.sh --status-file "$RUNNER_TEMP/native-test-status.jsonl" --files "$FILES" -- \
             ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
             -m "platforms and not integration" \
             -v --tb=short
@@ -232,6 +232,17 @@ jobs:
           OPENROUTER_API_KEY: ''
           OPENAI_API_KEY: ''
           NOUS_API_KEY: ''
+
+      # Upload immediately after the test step, before cache/post-job teardown.
+      # A hard job cancellation can still prevent this step; no delivery guarantee.
+      - name: Retain body-free native per-file status
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-test-status-${{ github.run_attempt }}-${{ inputs.platform_scope }}-${{ matrix.marker }}-${{ runner.arch }}-${{ matrix.slice || 'all' }}
+          path: ${{ runner.temp }}/native-test-status.jsonl
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Retain bounded grant-lock timings
         if: always() && matrix.marker == 'windows'
