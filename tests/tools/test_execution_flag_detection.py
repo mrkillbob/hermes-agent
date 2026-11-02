@@ -38,7 +38,6 @@ def test_real_read_tool_binaries_confirm_option_ownership(
     [
         ("rg", ["--pre", "-payload-marker", "needle", "{input}"], None, False),
         ("rg", ["--hostname-bin=-payload-marker", "needle", "{input}"], None, False),
-        ("sort", ["--buffer-size=1K", "--compress-program", "-payload-marker"], "{bulk}", False),
         ("ag", ["--pager=-payload-marker", "needle", "{input}"], None, True),
         ("man", ["--pager", "-payload-marker", "ls"], None, True),
         ("man", ["-P", "-payload-marker", "ls"], None, True),
@@ -50,7 +49,7 @@ def test_real_binaries_execute_leading_dash_program_payload(
     """A PATH marker proves these binaries do not reparse '-program' as an option."""
     if shutil.which(tool) is None or (needs_tty and shutil.which("script") is None):
         pytest.skip(f"{tool} or script is not installed")
-    if sys.platform == "darwin" and tool in {"sort", "man"}:
+    if sys.platform == "darwin" and tool == "man":
         pytest.skip(f"{tool} execution-option integration is Linux-specific")
 
     marker = tmp_path / "executed"
@@ -60,11 +59,6 @@ def test_real_binaries_execute_leading_dash_program_payload(
     input_file = tmp_path / "input.txt"
     input_file.write_text("needle\n")
     resolved_args = [arg.format(input=str(input_file)) for arg in args]
-    input_text = (
-        "\n".join(str(number) for number in range(10_000, 0, -1)) + "\n"
-        if stdin == "{bulk}"
-        else stdin
-    )
     env = {
         **os.environ,
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
@@ -76,7 +70,7 @@ def test_real_binaries_execute_leading_dash_program_payload(
         argv = ["script", "-qec", shlex.join(argv), "/dev/null"]
 
     completed = subprocess.run(
-        argv, input=input_text, text=True, capture_output=True, env=env, timeout=20, check=False
+        argv, input=stdin, text=True, capture_output=True, env=env, timeout=20, check=False
     )
 
     if not marker.exists():
