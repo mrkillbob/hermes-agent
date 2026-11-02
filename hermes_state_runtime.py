@@ -129,7 +129,7 @@ ADMISSION_QUEUE_MAX = 32
 
 def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
                         request_id: str, payload: dict, intent: str = 'queue',
-                        _authorize_write=None, _replay_guard=None) -> dict:
+                        _authorize_write=None, _replay_guard=None, _commit_guard=None) -> dict:
     """Admit input; the trusted private guard raises to refuse a NEW write.
 
     The guard receives the owning transaction connection, must not commit it or
@@ -137,6 +137,9 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
     and terminal replays bypass it: they cannot create or change accepted work.
     ``_replay_guard(conn)`` runs on the exact live replay instead, inside the same
     transaction (a replacement's binding to the admission it retired).
+    ``_commit_guard`` is a trusted lease factory held through the actual write
+    commit, including live replays. Retired read-only history is not a fresh
+    authorization/acceptance and still requires caller-side read authorization.
     """
     for value in (principal_id, session_id, request_id):
         _text(value)
@@ -176,7 +179,7 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
             VALUES(?,?,?,?,?,?,?,?,'queued',?)''',
             (admission_id, request_id, principal_id, session_id, json.dumps([session_id]), encoded, digest, intent, epoch))
         return _row(_admission(conn, admission_id))
-    return db._execute_write(write)
+    return db._execute_write(write, _commit_guard=_commit_guard)
 
 
 def get_session_admission(db, *, admission_id: str) -> dict | None:
@@ -205,7 +208,8 @@ def list_session_admissions(db, *, session_id: str, pending_only: bool = True) -
 _ANY_HEAD = object()
 
 
-def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_ANY_HEAD) -> dict | bool | None:
+def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_ANY_HEAD,
+                        _commit_guard=None) -> dict | bool | None:
     """Claim the FIFO head. ``_guard(conn)`` (owner admission gate) raises to refuse inside the
     write transaction, so a drain that began while this waited on the writer still wins.
     ``head`` is the admission id the caller's preclaim checks validated (None: it saw nothing
@@ -241,11 +245,12 @@ def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_A
         # tell this turn's own failed-turn boundary from an earlier turn's (#134889 GW-21).
         claimed['transcript_mark'] = conn.execute('SELECT COALESCE(MAX(id), 0) FROM messages').fetchone()[0]
         return claimed
-    return db._execute_write(write)
+    return db._execute_write(write, _commit_guard=_commit_guard)
 
 
 def settle_session_input(db, *, epoch: int, admission_id: str, generation: int, outcome: str,
-                         result: dict | None = None, _transfers=None, _terminal_write=None) -> dict:
+                         result: dict | None = None, _transfers=None, _terminal_write=None,
+                         _commit_guard=None) -> dict:
     """``_terminal_write(conn, row)`` is the owner's same-transaction effect (a transcript notice,
     ``gateway.session_results.finish_result``); like ``resolve_unknown_session_input``'s it must
     not commit, may run again on SQLite retry, and raising rolls the settlement back."""
@@ -273,7 +278,7 @@ def settle_session_input(db, *, epoch: int, admission_id: str, generation: int, 
         settle_steer_transfers(conn, epoch=epoch, generation=generation, transfers=_transfers, outcome=outcome)
         conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (row['target_session_id'],))
         return _row(_admission(conn, admission_id))
-    return db._execute_write(write)
+    return db._execute_write(write, _commit_guard=_commit_guard)
 
 
 _CANCEL_QUEUED = "UPDATE session_admissions SET status='terminal',outcome='cancelled' WHERE admission_id=?"
