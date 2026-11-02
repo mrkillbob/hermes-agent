@@ -61,20 +61,40 @@ def inspect_tasks(database: Path, board: str, task_ids: list[str]) -> dict:
                     inspection_only=True, admission_granted=False, cards=cards)
 
 
+def inspect_deliverables(database: Path, board: str, task_ids: list[str], selection: str) -> dict:
+    """Project acceptance for explicit selected IDs; never rewrite operational counts."""
+    from hermes_cli.kanban_artifact_acceptance import artifact_acceptance_view
+
+    if selection not in ('all', 'accepted', 'unaccepted'):
+        raise ValueError('unknown deliverable selection')
+    result = inspect_tasks(database, board, task_ids)
+    for card in result['cards']:
+        card['artifact_acceptance'] = artifact_acceptance_view(board, card['task_id'], card['rows'])
+    accepted = sum(c['artifact_acceptance']['deliverable_accepted'] for c in result['cards'])
+    result['selected_deliverable_counts'] = dict(accepted=accepted, unaccepted=len(task_ids) - accepted)
+    result['selection'] = selection
+    result['cards'] = [c for c in result['cards'] if selection == 'all'
+                       or c['artifact_acceptance']['deliverable_accepted'] == (selection == 'accepted')]
+    return result
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--database', type=Path, required=True)
     parser.add_argument('--board', required=True)
     parser.add_argument('--census', action='store_true', help='count task states without reading card content')
+    parser.add_argument('--deliverables', choices=('all', 'accepted', 'unaccepted'),
+                        help='separate artifact-acceptance view for the selected task IDs')
     parser.add_argument('task_ids', nargs='*')
     args = parser.parse_args(argv)
-    if args.census and args.task_ids:
-        parser.error('--census cannot be combined with task IDs')
+    if args.census and (args.task_ids or args.deliverables):
+        parser.error('--census cannot be combined with task IDs or --deliverables')
     if not args.census and not args.task_ids:
         parser.error('provide task IDs or --census')
     try:
         result = (inspect_census(args.database, args.board) if args.census
-                  else inspect_tasks(args.database, args.board, args.task_ids))
+                  else inspect_deliverables(args.database, args.board, args.task_ids, args.deliverables)
+                  if args.deliverables else inspect_tasks(args.database, args.board, args.task_ids))
     except (sqlite3.Error, OSError, ValueError) as error:
         print(json.dumps(dict(error=type(error).__name__, message=str(error),
                               sqlite_version=sqlite3.sqlite_version,
