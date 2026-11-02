@@ -16,8 +16,9 @@ permissions:
 
 jobs:
   rerun-failed:
+    # Repository identity survives transfers; a fork or reused name does not match.
     if: >-
-      github.repository == 'mrkillbob/hermes-agent' &&
+      github.repository_id == '1341623970' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(fromJSON('["run-e2e", "ci-reviewed"]'), github.event.label.name)
     # On the job, so only the two maintainer labels enter the group: an unrelated

@@ -25,8 +25,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Repository identity survives transfers; a fork or reused name does not match.
   native-contracts:
-    if: github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request'
+    if: github.repository_id == '1341623970' && github.event_name == 'pull_request'
     runs-on: macos-15
     timeout-minutes: 45
     steps:
@@ -67,7 +68,7 @@ jobs:
 
   macos-arm64:
     if: >-
-      github.repository == 'mrkillbob/hermes-agent' &&
+      github.repository_id == '1341623970' &&
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main'
     runs-on: macos-15
