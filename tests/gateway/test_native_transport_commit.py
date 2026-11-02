@@ -72,16 +72,14 @@ def test_changed_or_expired_native_scope_refuses_actual_write(native, monkeypatc
     clock = [100.0]
     monkeypatch.setattr(module.time, 'monotonic', lambda: clock[0])
     operation = issue(native, lifetime_s=1)
-    if mutation == 'port':
-        native.connection.transport = object()
-    elif mutation == 'actor-copy':
-        native.connection.actor = replace(native.connection.actor)
-    elif mutation == 'registration':
-        native.authority._native_legacy_transports.clear()
-    elif mutation == 'non-native':
-        native.connection.native_owner = False
-    else:
-        clock[0] = 101.0
+    mutations = {
+        'port': lambda: setattr(native.connection, 'transport', object()),
+        'actor-copy': lambda: setattr(native.connection, 'actor', replace(native.connection.actor)),
+        'registration': native.authority._native_legacy_transports.clear,
+        'non-native': lambda: setattr(native.connection, 'native_owner', False),
+        'expiry': lambda: clock.__setitem__(0, 101.0),
+    }
+    mutations[mutation]()
     with pytest.raises(rt.RuntimeStoreError, match='native_commit_unavailable'):
         native.db._execute_write(write, _commit_guard=operation.at_commit)
     assert visible(native) is None
