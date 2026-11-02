@@ -87,7 +87,8 @@ def _hold(_args):
 def _prepare_reboot(args):
     from hermes_cli.startup_hold_reboot import prepare
     return prepare(ledger_sha256=args.ledger_sha256, entry_sha256=args.entry_sha256,
-                   install=args.install_id, spawner=[args.spawner_pid, args.spawner_birth])
+                   install=args.install_id, spawner=[args.spawner_pid, args.spawner_birth],
+                   supersede_sha256=args.supersede_sha256)
 
 
 def _reconcile(_args):
@@ -135,6 +136,7 @@ def add_parser(subparsers):
     begin.add_argument('--board', default='default')
     begin.add_argument('--seconds', type=int, default=900)
     prepare = actions.add_parser('prepare-reboot-reconcile', help='Under ESTOP, checkpoint exact legacy rows for a future full host reboot')
+    prepare.add_argument('--supersede-sha256', help='Retain and supersede exactly this obsolete schema1/2 checkpoint')
     prepare.add_argument('--ledger-sha256', required=True)
     prepare.add_argument('--entry-sha256', action='append', required=True)
     prepare.add_argument('--install-id', required=True)

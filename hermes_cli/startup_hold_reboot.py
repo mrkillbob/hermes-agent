@@ -94,9 +94,9 @@ def _source_binding():
     return dict(path=str(root), sha256=_hash(hashes))
 
 
-def _binding(schema=2):
+def _binding(schema=2, writers=None):
     from hermes_cli.startup_hold_reconcile import ledger_snapshot, _version
-    if type(schema) is not int or schema not in (1, 2):
+    if type(schema) is not int or schema not in (1, 2, 3):
         _refuse()
     root = get_default_hermes_root().resolve()
     path = root / 'spawn-ledger.json'
@@ -110,8 +110,17 @@ def _binding(schema=2):
         _refuse()
     binding = dict(root=dict(path=str(root), device=info.st_dev, inode=info.st_ino, uid=_uid()),
                    source=_source_binding(), ledger=dict(sha256=digest, version=list(_version(after))))
-    if schema == 2:
+    if schema >= 2:
         binding['volume'] = _volume_binding(root, path, info, after)
+    if schema == 3:
+        if writers is None:
+            _refuse()
+        binding['writers'] = writers.check()
+        if writers.version is not None and writers.version[0] != info.st_dev:
+            _refuse()
+        for fd, _, _ in writers.files.values():
+            if _native_volume(fd) != binding['volume'] or os.fstat(fd).st_dev != info.st_dev:
+                _refuse()
     return binding, entries
 
 
@@ -180,9 +189,12 @@ def _paused():
 
 
 def _historical_binding_shape(binding, schema):
-    keys = {'root', 'source', 'ledger'} | ({'volume'} if schema == 2 else set())
+    keys = {'root', 'source', 'ledger'} | ({'volume'} if schema >= 2 else set()) | ({'writers'} if schema == 3 else set())
     if set(binding) != keys:
         _refuse()
+    if schema == 3:
+        from hermes_cli.startup_hold_writer_checkpoint import cross_boot
+        cross_boot(binding['writers'])
     root, source, ledger = (binding[key] for key in ('root', 'source', 'ledger'))
     if (not isinstance(root, dict) or set(root) != {'path', 'device', 'inode', 'uid'}
             or not isinstance(root['path'], str) or not root['path']
@@ -196,7 +208,7 @@ def _historical_binding_shape(binding, schema):
             or any(type(value) is not int or value < 0 for value in ledger['version'])
             or ledger['version'][1] == 0 or ledger['version'][5] != 1):
         _refuse()
-    if schema == 2:
+    if schema >= 2:
         try:
             if (not uuid.UUID(binding['volume']).int
                     or str(uuid.UUID(binding['volume'])) != binding['volume']
@@ -210,16 +222,20 @@ def _cross_boot_bindings(binding, schema):
     """Only schema2 replaces historical mount device numbers; never current checks."""
     if schema == 1:
         return binding
-    return dict(root={key: value for key, value in binding['root'].items() if key != 'device'},
+    result = dict(root={key: value for key, value in binding['root'].items() if key != 'device'},
                 source=binding['source'], volume=binding['volume'],
                 ledger=dict(sha256=binding['ledger']['sha256'], version=binding['ledger']['version'][1:]))
+    if schema == 3:
+        from hermes_cli.startup_hold_writer_checkpoint import cross_boot
+        result['writers'] = cross_boot(binding['writers'])
+    return result
 
 
 def validate(record, binding, entries, identity):
     """Pure bindings plus strict current liveness; inputs are acquired under custody."""
     if (not isinstance(record, dict) or set(record) != {'schema', 'kind', 'id', 'binding',
             'host', 'boot_before', 'entries', 'install', 'spawner', 'phase'}
-            or type(record.get('schema')) is not int or record['schema'] not in (1, 2)
+            or type(record.get('schema')) is not int or record['schema'] not in (1, 2, 3)
             or record['kind'] != 'prospective_local_reboot' or record['phase'] != 'committed'
             or not isinstance(record['binding'], dict)
             or set(record['binding']) != set(binding)):
@@ -236,6 +252,8 @@ def validate(record, binding, entries, identity):
         _refuse()
     previous = _cross_boot_bindings(record['binding'], record['schema'])
     current = _cross_boot_bindings(binding, record['schema'])
+    if record['schema'] == 3 and (previous != current or record['host'] != identity['host']):
+        _refuse()
     if previous['ledger'] != current['ledger']:
         hashes = record['entries']
         if any(_hash(entry) in hashes for entry in entries):
@@ -252,9 +270,10 @@ def validate(record, binding, entries, identity):
 
 
 class _Proof:
-    def __init__(self, record=None, fd=None, version=None):
+    def __init__(self, record=None, fd=None, version=None, writers=None):
         self.record, self.fd, self.version = record, fd, version
         self.rows = frozenset()
+        self.writers = writers
 
     def check(self):
         if self.record is None:
@@ -263,7 +282,7 @@ class _Proof:
         from hermes_cli.startup_hold_writers import refuse_live_writers
         _paused()
         refuse_live_writers()
-        binding, entries = _binding(schema=self.record.get('schema'))
+        binding, entries = _binding(schema=self.record.get('schema'), writers=self.writers)
         if (_version(os.fstat(self.fd)) != self.version
                 or _version((get_default_hermes_root() / _FILENAME).lstat()) != self.version):
             _refuse()
@@ -271,7 +290,7 @@ class _Proof:
 
 
 @contextmanager
-def reboot_exclusion():
+def reboot_exclusion(*, writers=None):
     """Caller retains checkout, admission, writer, profile and ledger gates through publication."""
     from hermes_cli.startup_hold_reconcile import _version
     from pm.lifetime_handles import open_hold
@@ -279,6 +298,8 @@ def reboot_exclusion():
     try:
         named = path.lstat()
     except FileNotFoundError:
+        if writers is not None:
+            _refuse()
         yield _Proof()
         return
     if (os.name == 'nt' or not stat.S_ISREG(named.st_mode) or named.st_nlink != 1
@@ -302,9 +323,9 @@ def reboot_exclusion():
             record = json.loads(raw.decode('utf-8'))
         except (ValueError, UnicodeError):
             _refuse()
-        if not isinstance(record, dict):
+        if not isinstance(record, dict) or (writers is not None and record.get('schema') != 3):
             _refuse()
-        proof = _Proof(record, fd, _version(named))
+        proof = _Proof(record, fd, _version(named), writers)
         proof.check()
         yield proof
         proof.check()
@@ -359,12 +380,8 @@ def _write_checkpoint(record, check):
         os.close(fd)
 
 
-def prepare(*, ledger_sha256, entry_sha256, install, spawner):
+def prepare(*, ledger_sha256, entry_sha256, install, spawner, supersede_sha256=None):
     """Explicit operator write of a prospective checkpoint; never reboot or alter ledger."""
-    from gateway.drain_startup import _checkout_custody
-    from gateway.drain_kanban import _marker_lock, _quiescent_profiles
-    from hermes_cli.kanban_db_connect import _dispatch_host_admission_lock
-    from hermes_cli.process_ledger_lock import ledger_gate
     from hermes_cli import startup_hold
     from hermes_cli.startup_hold_writers import refuse_live_writers
     _paused()
@@ -374,31 +391,52 @@ def prepare(*, ledger_sha256, entry_sha256, install, spawner):
     except FileNotFoundError:
         pass
     else:
+        if supersede_sha256 is not None:
+            return _prepare_with_existing(ledger_sha256, entry_sha256, install, spawner, supersede_sha256)
         # Refusal only: retain writer-debt precedence without creating PM state.
         with startup_hold.writer_exclusion():
             refuse_live_writers()
             raise FileExistsError('prospective checkpoint already exists')
+    if supersede_sha256 is not None:
+        _refuse()
+    return _prepare_with_existing(ledger_sha256, entry_sha256, install, spawner, None)
+
+
+def _prepare_with_existing(ledger_sha256, entry_sha256, install, spawner, supersede_sha256):
+    from gateway.drain_startup import _checkout_custody
+    from gateway.drain_kanban import _marker_lock, _quiescent_profiles
+    from hermes_cli.kanban_db_connect import _dispatch_host_admission_lock
+    from hermes_cli.process_ledger_lock import ledger_gate
+    from hermes_cli import startup_hold
+    from hermes_cli.startup_hold_writers import refuse_live_writers
+    from hermes_cli.startup_hold_writer_checkpoint import capture_writers
     with _checkout_custody(stable_identity=True), _dispatch_host_admission_lock(strict=True) as acquired:
         if not acquired:
             raise RuntimeError('startup_hold_dispatch_busy')
-        with startup_hold.admission_gate(), startup_hold.writer_exclusion(), _marker_lock(), _quiescent_profiles(), ledger_gate():
+        with startup_hold.admission_gate(), capture_writers() as writers, _marker_lock(), _quiescent_profiles(), ledger_gate():
             refuse_live_writers()
             identity = _native_identity()
-            binding, entries = _binding()
+            schema = 3 if writers.files else 2
+            binding, entries = _binding(schema, writers)
             if not _digest(ledger_sha256) or binding['ledger']['sha256'] != ledger_sha256:
                 _refuse()
             _refuse_uncertain(entries)
             _selected(entries, entry_sha256, install, spawner)
-            record = dict(schema=2, kind='prospective_local_reboot', id=uuid.uuid4().hex,
+            record = dict(schema=schema, kind='prospective_local_reboot', id=uuid.uuid4().hex,
                           binding=binding, host=identity['host'], boot_before=identity['boot'],
                           entries=entry_sha256, install=install, spawner=spawner)
             _paused()
-            if _binding()[0] != binding or _native_identity() != identity:
+            if _binding(schema, writers)[0] != binding or _native_identity() != identity:
                 _refuse()
             def check():
                 _paused()
-                if _binding()[0] != binding or _native_identity() != identity:
+                if _binding(schema, writers)[0] != binding or _native_identity() != identity:
                     _refuse()
-            _write_checkpoint(record, check)
+            history = None
+            if supersede_sha256 is None:
+                _write_checkpoint(record, check)
+            else:
+                from hermes_cli.startup_hold_reboot_supersede import supersede
+                history = supersede(record, check, expected_sha256=supersede_sha256, entries=entries)
             return dict(checkpoint_id=record['id'], reboot_required=True, rows=len(entry_sha256),
-                        admission_granted=False, ledger_changed=False)
+                        admission_granted=False, ledger_changed=False, retained_checkpoint=history)
