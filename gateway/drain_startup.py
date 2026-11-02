@@ -81,6 +81,7 @@ def _transaction():
     from agent.estop import is_engaged
     from hermes_cli.process_ledger_lock import ledger_gate
     from hermes_cli.startup_hold_reboot import reboot_exclusion
+    from hermes_cli.startup_hold_writer_checkpoint import reconciliation_writers
     from gateway.drain_kanban import _marker_lock, _quiescent_profiles
     from hermes_cli.kanban_db_connect import _dispatch_host_admission_lock
     if not is_engaged():
@@ -88,7 +89,7 @@ def _transaction():
     with _checkout_custody(), _dispatch_host_admission_lock(strict=True) as acquired:
         if not acquired:
             raise RuntimeStoreError('startup_hold_dispatch_busy')
-        with startup_hold.admission_gate(), startup_hold.writer_exclusion() as covered, _marker_lock(), _quiescent_profiles(), ledger_gate(), reboot_exclusion() as proof:
+        with startup_hold.admission_gate(), reconciliation_writers() as (covered, writers), _marker_lock(), _quiescent_profiles(), ledger_gate(), reboot_exclusion(writers=writers) as proof:
             if proof.record is None:
                 _refuse_legacy_writers(covered)
             else:
