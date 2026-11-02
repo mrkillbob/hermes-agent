@@ -213,9 +213,14 @@ def test_probe_populated_edge_caps_synthetic_domain(tmp_path: Path) -> None:
 # ── lost_and_found lane: unreadable table schemas ───────────────────────────
 
 
+@pytest.mark.parametrize("prior_refusal", [
+    {},
+    {"reason": "wal_reset_vulnerable", "detail": "a previous CLI was vulnerable"},
+])
 def test_unreadable_schema_without_cli_names_the_sqlite3_requirement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    prior_refusal: dict,
 ) -> None:
     """Without a sqlite3 CLI the refusal must say exactly what to install."""
     source = tmp_path / "schemaless.db"
@@ -224,7 +229,9 @@ def test_unreadable_schema_without_cli_names_the_sqlite3_requirement(
 
     import hermes_cli.session_lost_and_found as laf
 
-    monkeypatch.setattr(laf, "find_sqlite3_cli", lambda: None)
+    monkeypatch.setattr(laf, "_last_cli_refusal", prior_refusal)
+    # Exercise the finder so a prior host probe cannot supply a stale refusal.
+    monkeypatch.setattr(laf.shutil, "which", lambda command: None)
     with pytest.raises(SessionRecoverySourceError) as excinfo:
         recover_session_database(
             source,
@@ -236,6 +243,25 @@ def test_unreadable_schema_without_cli_names_the_sqlite3_requirement(
     assert "sessions" in message and "messages" in message
     assert "sqlite3" in message
     assert ".recover" in message
+    assert not output.exists()
+
+
+def test_unreadable_schema_refuses_vulnerable_salvage_cli(tmp_path, monkeypatch):
+    import hermes_cli.session_lost_and_found as laf
+
+    monkeypatch.setattr(laf, "_last_cli_refusal", {})
+    source = tmp_path / "schemaless.db"
+    output = tmp_path / "schemaless-recovered.db"
+    _make_schema_unreadable_source(source)
+    monkeypatch.setattr(laf.shutil, "which", lambda command: "/synthetic/sqlite3")
+    monkeypatch.setattr(laf, "_cli_supports_recover", lambda binary: True)
+    monkeypatch.setattr(laf, "_parse_sqlite3_cli_version", lambda binary: (3, 51, 2))
+
+    with pytest.raises(SessionRecoverySourceError, match="not safe to use") as excinfo:
+        recover_session_database(source, output, work_dir=tmp_path, allow_partial=True)
+
+    assert "WAL" in str(excinfo.value)
+    assert laf.find_sqlite3_cli_refusal()["reason"] == "wal_reset_vulnerable"
     assert not output.exists()
 
 

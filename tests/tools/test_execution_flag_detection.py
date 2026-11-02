@@ -75,7 +75,20 @@ def test_real_binaries_execute_leading_dash_program_payload(
     if needs_tty:
         argv = ["script", "-qec", shlex.join(argv), "/dev/null"]
 
-    subprocess.run(argv, input=input_text, text=True, capture_output=True, env=env, timeout=20, check=False)
+    completed = subprocess.run(
+        argv, input=input_text, text=True, capture_output=True, env=env, timeout=20, check=False
+    )
+
+    if not marker.exists():
+        binary = shutil.which(tool, path=env["PATH"])
+        version = subprocess.run(
+            [binary, "--version"], text=True, capture_output=True, env=env, timeout=5, check=False
+        )
+        pytest.fail(
+            f"payload was not executed: binary={binary!r}, realpath={os.path.realpath(binary)!r}, "
+            f"version={version.stdout!r}, version_stderr={version.stderr!r}, "
+            f"argv={argv!r}, returncode={completed.returncode}, stderr={completed.stderr!r}"
+        )
 
     assert marker.read_text() == "executed"
 
