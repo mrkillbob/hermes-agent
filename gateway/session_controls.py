@@ -11,6 +11,7 @@ import uuid
 from gateway.config import Platform
 from gateway.session_contract import CANONICAL_GATEWAY_PROTOCOL, Principal, SessionRef, Submission
 from gateway.session_llm_oneshot import DeferredReply
+from gateway.session_native_commit import fenced_native_close
 from hermes_constants import profile_name_for_home
 from hermes_state_errors import PERSISTENCE_ERROR_CAUSES, classify_persistence_error
 from hermes_state_runtime import RuntimeStoreError
@@ -186,6 +187,15 @@ class AuthorityConnection:
         self.handed_back = set()  # sessions this live client detached without closing (the TUI's switcher)
         self._identity, self._operator, self._siblings = identity, operator, {}
         authority.events[self.actor.transport_id] = transport
+        from gateway.session_native_commit import register_issuer
+        self._native_commit_issuer = register_issuer(self)
+
+    def issue_native_commit(self, *, operation_id, payload_sha256, lifetime_s=60):
+        """Trusted host-only transport lease; not a wire verb or note permission."""
+        if self._native_commit_issuer is None:
+            raise RuntimeStoreError('native_commit_unavailable')
+        return self._native_commit_issuer.issue(operation_id=operation_id,
+            payload_sha256=payload_sha256, lifetime_s=lifetime_s)
 
     @property
     def host_scoped(self):
@@ -200,6 +210,8 @@ class AuthorityConnection:
         like a profile nobody here serves. Never a fallback, never a rewritten profile_id."""
         if getattr(self, '_reference_intake_open', True) is False:
             raise RuntimeStoreError('permission_denied')
+        if (issuer := getattr(self, '_native_commit_issuer', None)) is not None and issuer.closing:
+            raise RuntimeStoreError('native_commit_unavailable')
         from hermes_cli.profiles import profile_matches_home
         if profile_matches_home(profile, Path(self.authority.profile_id)):
             return None
@@ -212,6 +224,9 @@ class AuthorityConnection:
                 # A re-served profile is a new authority under the same id: never keep routing to
                 # the retired one (it refuses every admission for the rest of this socket's life).
                 if connection is None or connection.authority is not sibling:
+                    if connection is not None:
+                        from gateway.session_native_commit import retire_native_sibling
+                        retire_native_sibling(connection)
                     identity = dict(self._identity, profile_id=sibling.profile_id, instance_id=sibling.instance_id)
                     connection = AuthorityConnection(sibling, self.transport, identity, operator=self._operator)
                     self._siblings[sibling.profile_id] = connection
@@ -1002,6 +1017,7 @@ class AuthorityConnection:
         for sibling in self._siblings.values():
             sibling._close_reference_intake()
 
+    @fenced_native_close
     async def close(self):
         self._close_reference_intake()
         for sibling in self._siblings.values():
