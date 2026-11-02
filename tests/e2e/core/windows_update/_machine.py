@@ -66,6 +66,7 @@ from tests.e2e.core.windows._helpers import (
 from tests.fakes.fake_llm_provider import write_hermes_home
 from tests.e2e.core.windows_update._command_evidence import CommandEvidence
 from tests.e2e.core.windows_update._process_evidence import CleanupEvidence, note_identity, note_unclassified
+from tests.e2e.core.windows_update._timeout_evidence import bind_process, capture_timeout
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 OPT_IN_ENV = "HERMES_E2E_WINDOWS_INSTALL"
@@ -385,8 +386,15 @@ class Machine:
                     f"{self.evidence()}") from None
             return Run(code, _decode(log.read_bytes()), "")
         chunks: list[bytes] = []
-        proc = subprocess.Popen(argv, cwd=cwd or self.profile, env=self.env(env_extra),
+        # Bind npm's existing private log directories to this command, not a shared
+        # runner TEMP scan. Never copy the raw logs into retained artifacts.
+        temporary = self.local / "Temp" / f"command-{self._seq}"
+        temporary.mkdir(parents=True, exist_ok=False)
+        env = self.env(env_extra)
+        env.update({"TEMP": str(temporary), "TMP": str(temporary), "TMPDIR": str(temporary)})
+        proc = subprocess.Popen(argv, cwd=cwd or self.profile, env=env,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        observed_owner = bind_process(proc.pid)
         status = CommandEvidence(log.with_suffix(".status.json"), started, timeout)
 
         def pump() -> None:
@@ -410,6 +418,7 @@ class Machine:
             except subprocess.TimeoutExpired:
                 status.timeout_reached_s = round(time.monotonic() - started, 3)
                 status.observed_returncode_before_cleanup = proc.returncode
+                capture_timeout(log.with_suffix(".timeout.json"), temporary, observed_owner)
                 status.termination_started = True
                 status.save(returncode=proc.returncode, reader_finished=not reader.is_alive())
                 killed = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
