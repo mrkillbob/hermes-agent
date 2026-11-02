@@ -84,9 +84,24 @@ class _TimeoutProcess:
 def test_timeout_preserves_existing_termination_and_numeric_status(machine, monkeypatch):
     proc = _TimeoutProcess()
     calls = []
-    monkeypatch.setattr(_machine.subprocess, "Popen", lambda *args, **kwargs: proc)
+
+    def start(*args, **kwargs):
+        temporary = Path(kwargs['env']['TEMP'])
+        assert temporary.is_relative_to(machine.local)
+        assert kwargs['env']['TMP'] == str(temporary)
+        logs = temporary / 'hermes-npm-logs-fixture'
+        logs.mkdir()
+        (logs / 'debug.log').write_text('1 silly fetch manifest private-sentinel\n')
+        return proc
+
+    monkeypatch.setattr(_machine.subprocess, "Popen", start)
+    monkeypatch.setattr(_machine, "bind_process", lambda pid: None, raising=False)
 
     def taskkill(argv, **kwargs):
+        receipt = machine.logs / '01-install.timeout.json'
+        assert receipt.is_file(), 'sanitized evidence must be durable before killing npm'
+        assert 'private-sentinel' not in receipt.read_text()
+        assert json.loads(receipt.read_text())['npm']['logs'][0]['last_event'] == 'fetch_manifest'
         calls.append((argv, kwargs))
         return subprocess.CompletedProcess(argv, 5, "private sentinel output", "private sentinel error")
 
