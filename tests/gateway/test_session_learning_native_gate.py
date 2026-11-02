@@ -38,6 +38,7 @@ def registered():
     connection.actor = actor
     connection.transport = transport
     connection.native_owner = True
+    connection._reference_intake_open = True
     connection._identity = {'provider': 'local', 'instance_id': 'instance-a',
                             'profile_id': actor.profile_id}
     return SimpleNamespace(broker=LearningBroker(authority), authority=authority,
