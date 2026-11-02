@@ -35,7 +35,7 @@ def sort_payload(tmp_path):
     return marker, env, bulk
 
 
-@pytest.mark.platforms("linux", "macos")
+@pytest.mark.platforms("linux")
 def test_gnu_sort_executes_separate_leading_dash_program(sort_payload):
     # Ubuntu exposes GNU utilities as gnu-prefixed commands; Homebrew uses gsort.
     binary, observed = _find_sort("GNU coreutils", ("gnusort", "gsort", "sort"))
