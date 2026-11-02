@@ -43,7 +43,11 @@ jobs:
     name: CI review comment (live)
     # Fork PRs get no comment: the poller needs a write token, and the
     # ``pull_requests`` payload is empty for a fork run.
+    # This fork uses the Checks tab; do not allocate a long-lived comment
+    # poller. Immutable repository identity keeps this preference on transfer.
+    # Actual CI, review-label and security gates remain in ci.yaml.
     if: >-
+      github.repository_id != '1341623970' &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
