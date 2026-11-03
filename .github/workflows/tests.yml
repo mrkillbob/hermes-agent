@@ -177,9 +177,13 @@ jobs:
     # cannot access NousResearch's private runner groups, but one hosted runner
     # avoids multiplying dependency setup and flooding the fork's runner quota.
     runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
-    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 45 }}
+    # Slow fetch/setup must not consume the full suite's execution window.
+    # Fork budget: 30m checkout + 60m tests + 30m locked setup/build/cleanup.
+    # Keep the existing per-file deadlines, workers and zero-retry policy.
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 120 }}
     steps:
       - name: Checkout code
+        timeout-minutes: 30
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
@@ -272,6 +276,7 @@ jobs:
           NOUS_API_KEY: ""
 
       - name: Run e2e tests
+        timeout-minutes: 60
         # One subprocess per file, in parallel: the core suites spawn real
         # processes (serve, gateway, tui_gateway, MCP servers, SQLite writers)
         # and must not share interpreter state.
