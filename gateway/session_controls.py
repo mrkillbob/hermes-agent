@@ -208,10 +208,10 @@ class AuthorityConnection:
         home. Only a host-scoped grant (the Desktop's shared-primary socket, the dashboard gate)
         reaches a sibling; a profile-bound ticket naming any other profile is a mismatch, exactly
         like a profile nobody here serves. Never a fallback, never a rewritten profile_id."""
-        if getattr(self, '_reference_intake_open', True) is False:
-            raise RuntimeStoreError('permission_denied')
         if (issuer := getattr(self, '_native_commit_issuer', None)) is not None and issuer.closing:
             raise RuntimeStoreError('native_commit_unavailable')
+        if getattr(self, '_reference_intake_open', True) is False:
+            raise RuntimeStoreError('permission_denied')
         from hermes_cli.profiles import profile_matches_home
         if profile_matches_home(profile, Path(self.authority.profile_id)):
             return None
