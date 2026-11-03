@@ -61,7 +61,7 @@ def run_stage(stage):
             print(f"Stage {stage} exited with code {e.code}")
             return False
         return True
-    except Exception as e:
+    except Exception as e:  # health: allow BLE001 -- stage boundary: prints the traceback and reports failure so later stages can be skipped
         print(f"ERROR in stage {stage}: {e}")
         import traceback
         traceback.print_exc()
