@@ -19,6 +19,7 @@ from agent.context_compressor import (
     user_originated_turn_view,
 )
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static
+from agent.diagnostic_reference_policy import retained_policy
 from agent.memory_context import sanitize_context
 
 from agent.tool_dispatch_helpers import _is_multimodal_tool_result, _multimodal_text_summary
@@ -541,6 +542,9 @@ class SessionPersistenceMixin:
         ``_flush_messages_to_session_db`` and written only to the DB row, never mutating the live message
         list used by the API call (#48677 is thus closed for every persist caller, not just this one).
         """
+        if retained_policy(self) is not None:
+            self._session_messages = messages  # live context until physical turn completion
+            return
         from agent.agent_runtime_helpers import note_turn_persisted
         with _persist_lock(self):
             # Only the scaffolding goes here. Closing a tool tail this uncovers is the exit
@@ -569,6 +573,8 @@ class SessionPersistenceMixin:
 
     def _flush_messages_to_session_db(self, messages: list[dict], conversation_history: Optional[list[dict]] = None):
         """Serialize direct and turn-boundary session flushes per agent."""
+        if retained_policy(self) is not None:
+            return None
         with _persist_lock(self):
             return self._flush_messages_to_session_db_unlocked(messages, conversation_history)
 
@@ -589,7 +595,7 @@ class SessionPersistenceMixin:
         """
         # Persistence-isolated agents (background review fork) share the parent's session_id for cache warmth;
         # a write here would land the curator's turn in the user's real history.
-        if getattr(self, "_persist_disabled", False) or not self._session_db:
+        if retained_policy(self) is not None or getattr(self, "_persist_disabled", False) or not self._session_db:
             return None
         batch_rows: list[dict[str, Any]] = []
         try:
@@ -625,10 +631,10 @@ class SessionPersistenceMixin:
 
     def _save_trajectory(self, messages: list[dict[str, Any]], user_query: str, completed: bool):
         """Save conversation trajectory to JSONL file."""
-        if not self.save_trajectories:
+        if retained_policy(self) is not None or not self.save_trajectories:
             return
         trajectory = self._convert_to_trajectory_format(messages, user_query, completed)
         _save_trajectory_to_file(trajectory, self.model, completed)
 
     _extract_api_error_context = _forward_static("agent.agent_runtime_helpers", "extract_api_error_context")
-    _dump_api_request_debug = _forward("agent.agent_runtime_helpers", "dump_api_request_debug")
+    _dump_api_request_debug = _forward("agent.diagnostic_reference_policy", "dump_request_debug")
