@@ -17,14 +17,12 @@ from tests.waiting import async_wait_until, wait_until
 async def _reload(desktop):
     """The renderer reloads: its socket closes and a new one connects and resumes."""
     from gateway.session_controls import AuthorityConnection
-    from gateway.session_local_migration import bind_native_transport
     await desktop.connection.close()
     identity = {"user_id": "uid:1", "provider": "local", "profile_id": desktop.authority.profile_id,
                 "instance_id": "owner", "native_bootstrap": True}
     desktop.transport = _Transport()
     desktop.transport.desktop_local = True
     desktop.connection = AuthorityConnection(desktop.authority, desktop.transport, identity)
-    bind_native_transport(desktop.authority, desktop.connection.actor, identity)
 
 
 @pytest.mark.asyncio

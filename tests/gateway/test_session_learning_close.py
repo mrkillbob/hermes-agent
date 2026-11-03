@@ -176,7 +176,7 @@ async def test_closing_host_cannot_publish_a_fresh_sibling(connections, monkeypa
     closing = asyncio.create_task(root.close())
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
-        with pytest.raises(RuntimeStoreError, match='permission_denied'):
+        with pytest.raises(RuntimeStoreError, match='native_commit_unavailable'):
             root._sibling_for('late')
         assert target.events == {}
     finally:

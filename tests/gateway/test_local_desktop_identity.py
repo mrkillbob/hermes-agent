@@ -57,8 +57,6 @@ async def _connect(tmp_path, monkeypatch, *, native=True, config=None):
         identity["native_bootstrap"] = True
     transport = _Transport(identity)
     connection = AuthorityConnection(authority, transport, identity)
-    from gateway.session_local_migration import bind_native_transport
-    bind_native_transport(authority, connection.actor, identity)
     return SimpleNamespace(authority=authority, connection=connection, transport=transport, runner=runner, home=home)
 
 
