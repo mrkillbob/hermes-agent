@@ -7,9 +7,12 @@ from threading import Event
 
 import pytest
 
-from tests.gateway.test_native_transport_commit import native, visible, write
-from tests.gateway.test_session_learning_admission import captured, admit
+from tests.gateway import test_native_transport_commit as native_fixtures
+from tests.gateway import test_session_learning_admission as learning_fixtures
 import hermes_state_runtime as runtime
+
+native, visible, write = native_fixtures.native, native_fixtures.visible, native_fixtures.write
+captured, admit = learning_fixtures.captured, learning_fixtures.admit
 
 
 def issue(state, operation='send', **kwargs):

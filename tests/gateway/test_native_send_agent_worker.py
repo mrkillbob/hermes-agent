@@ -5,8 +5,10 @@ from unittest.mock import MagicMock
 
 from agent.diagnostic_reference_policy import sealed_output_boundary
 
-from tests.gateway.test_native_transport_commit import native
-from tests.gateway.test_reference_observer_boundary import bridge
+from tests.gateway import test_native_transport_commit as native_fixtures
+from tests.gateway import test_reference_observer_boundary as observer_fixtures
+
+native, bridge = native_fixtures.native, observer_fixtures.bridge
 
 
 def test_actual_sdk_worker_holds_native_scope_through_client_cleanup(native, bridge, monkeypatch):
