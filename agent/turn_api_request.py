@@ -155,9 +155,10 @@ def build_request_payload(
         _set_extra_header(api_kwargs, "X-OpenRouter-Cache", "false")
     _apply_user_turn_request_headers(agent, api_kwargs)
     try:
+        from agent.local_text_policy import observer_hooks_suppressed
         from hermes_cli.middleware import apply_llm_request_middleware
         from hermes_cli.plugins import has_middleware
-        if has_middleware("llm_request"):
+        if not observer_hooks_suppressed() and has_middleware("llm_request"):
             from agent.llm_egress_lineage import barrier
             barrier()
 

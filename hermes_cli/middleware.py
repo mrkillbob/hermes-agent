@@ -87,6 +87,12 @@ def _apply_request_chain(
 
 def apply_llm_request_middleware(request: dict[str, Any], **context: Any) -> RequestMiddlewareResult:
     """Apply registered LLM request middleware; ``{"request": {...}}`` replaces the provider kwargs."""
+    from agent.local_text_policy import observer_hooks_suppressed
+
+    # Restricted payloads must not reach optional plugins, including discovery.
+    # Preserve the terminal request; this restriction confers no execution authority.
+    if observer_hooks_suppressed():
+        return RequestMiddlewareResult(payload=request, original_payload=request)
     from hermes_cli.plugins import has_middleware
 
     if not has_middleware(LLM_REQUEST_MIDDLEWARE):
@@ -135,6 +141,10 @@ def apply_tool_request_middleware(
 def run_llm_execution_middleware(
     request: dict[str, Any], next_call: Callable[[dict[str, Any]], Any], **context: Any) -> Any:
     """Run provider execution through registered LLM execution middleware."""
+    from agent.local_text_policy import observer_hooks_suppressed
+
+    if observer_hooks_suppressed():
+        return next_call(request)
     return _run_execution_chain(
         LLM_EXECUTION_MIDDLEWARE, next_call,
         request=request, original_request=context.pop("original_request", request), **context)
