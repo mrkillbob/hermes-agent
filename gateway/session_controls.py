@@ -179,6 +179,7 @@ class AuthorityConnection:
         from gateway.session_local_migration import bind_native_transport
         bind_native_transport(authority, self.actor, identity)
         self.native_owner = identity.get('native_bootstrap') is True
+        self._reference_intake_open = True
         self.subscriptions = {}
         # session_id -> (epoch, sequence) the last reconnect replay answered; spent by the next resume.
         self.replay_cursors = {}
@@ -197,6 +198,8 @@ class AuthorityConnection:
         home. Only a host-scoped grant (the Desktop's shared-primary socket, the dashboard gate)
         reaches a sibling; a profile-bound ticket naming any other profile is a mismatch, exactly
         like a profile nobody here serves. Never a fallback, never a rewritten profile_id."""
+        if getattr(self, '_reference_intake_open', True) is False:
+            raise RuntimeStoreError('permission_denied')
         from hermes_cli.profiles import profile_matches_home
         if profile_matches_home(profile, Path(self.authority.profile_id)):
             return None
@@ -992,7 +995,15 @@ class AuthorityConnection:
         return await self.authority.respond(self.actor, ref, params["execution_generation"],
             params["prompt_id"], {"answer": params["answer"]}, kind="clarify")
 
+    def _close_reference_intake(self):
+        # A host-scoped socket owns every sibling. Fence them all before any
+        # teardown awaits, including siblings whose detach has not begun yet.
+        self._reference_intake_open = False
+        for sibling in self._siblings.values():
+            sibling._close_reference_intake()
+
     async def close(self):
+        self._close_reference_intake()
         for sibling in self._siblings.values():
             await sibling.close()
         self._siblings.clear()

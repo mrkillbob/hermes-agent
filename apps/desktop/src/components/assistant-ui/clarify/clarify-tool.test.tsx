@@ -266,12 +266,14 @@ describe('ClarifyTool live card stays mounted across settle', () => {
       requestId: 'request-1',
       sessionId: 'session-1'
     })
+
     const args = {
       questions: [
         { question: 'Which deployment target?', choices: ['staging', 'production'] },
         { question: 'Which region?', choices: ['us', 'eu'] }
       ]
     }
+
     const props = { ...liveClarifyProps(), args, argsText: JSON.stringify(args) }
 
     renderClarify(<ClarifyTool {...props} />)
@@ -1243,9 +1245,9 @@ describe('ClarifyTool visible-card scoping', () => {
     $hoveredTreeGroup.set(null)
   })
 
-  /** Minimal per-session view — the pending card only reads `$runtimeId`. */
+  /** Per-session identity and transcript read by the pending card. */
   function tileView(sessionId: string): SessionView {
-    return { ...({} as SessionView), $runtimeId: atom<null | string>(sessionId), kind: 'tile' }
+    return { ...({} as SessionView), $runtimeId: atom<null | string>(sessionId), $messages: atom([]), kind: 'tile' }
   }
 
   function pendingCardProps(toolCallId: string): ToolCallMessagePartProps {

@@ -39,11 +39,13 @@ export function ClarifyToolPending({
   fromArgs,
   onAnswered,
   request,
+  rowIdentity,
   undelivered
 }: {
   fromArgs?: ClarifyArgs
   onAnswered: () => void
   request: ClarifyRequest | null
+  rowIdentity?: { sessionId: string; messageId: string; toolCallId: string; binding?: string }
   undelivered: boolean
 }) {
   const { t } = useI18n()
@@ -298,7 +300,12 @@ export function ClarifyToolPending({
       className="my-1.5 grid gap-4"
       data-clarify-batch={questions.length}
       data-clarify-batch-preview={ready ? undefined : ''}
+      data-clarify-bound-request-id={rowIdentity?.binding}
       data-clarify-choices={ready ? questions[keys.activeQuestion]?.choices?.length || undefined : undefined}
+      data-clarify-message-id={rowIdentity?.messageId}
+      data-clarify-request-id={request?.requestId}
+      data-clarify-session-id={rowIdentity?.sessionId}
+      data-clarify-tool-call-id={rowIdentity?.toolCallId}
       onKeyDownCapture={handleClarifySubmitShortcut}
       onSubmit={handleSubmit}
       ref={formRef}

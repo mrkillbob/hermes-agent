@@ -90,6 +90,7 @@ class LearningBroker:
         authority = self.authority
         require_serving(authority)
         if (type(connection) is not AuthorityConnection or connection.authority is not authority
+                or getattr(connection, '_reference_intake_open', False) is not True
                 or connection.native_owner is not True or type(ref) is not SessionRef
                 or ref.profile_id != authority.profile_id):
             _deny()

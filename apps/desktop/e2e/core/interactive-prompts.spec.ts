@@ -19,6 +19,7 @@ import * as path from 'node:path'
 
 import { expect, type Page, test } from '@playwright/test'
 
+import { captureClarifyOwners } from './clarify-evidence'
 import {
   coreAppEnv,
   createCoreSandbox,
@@ -80,8 +81,11 @@ test('clarify and approval prompts round-trip exactly once', async () => {
   const completion = (marker: string, step: number) =>
     provider.completions.find(c => c.marker === marker && c.step === step)
 
+  let clarifyOwners: Awaited<ReturnType<typeof captureClarifyOwners>> | undefined
+
   try {
     await waitForInteractive(app, page)
+    clarifyOwners = await captureClarifyOwners(page)
     await installDuplicateSampler(page)
 
     await test.step('clarify: the clicked choice is exactly what the model receives', async () => {
@@ -173,7 +177,15 @@ test('clarify and approval prompts round-trip exactly once', async () => {
       session.expectUserMarkers.push(U(3))
       await assertTranscriptOracle(page, ws, provider, session, 'approval deny')
     })
+  } catch (error) {
+    const evidence = clarifyOwners ? await clarifyOwners.evaluate(value => value.samples).catch(() => []) : []
+    await test.info().attach('clarify-form-owners', {
+      body: Buffer.from(JSON.stringify(evidence, null, 2)), contentType: 'application/json'
+    }).catch(() => undefined)
+    throw error
   } finally {
+    await clarifyOwners?.evaluate(value => value.stop()).catch(() => undefined)
+    await clarifyOwners?.dispose().catch(() => undefined)
     await app.close().catch(() => undefined)
     await provider.close()
     sandbox.cleanup()

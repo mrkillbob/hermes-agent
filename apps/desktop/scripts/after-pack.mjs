@@ -23,6 +23,7 @@ import { resolveSigningIdentity, signNestedChromium } from './sign-nested-chromi
 import { signWheelZipMembers } from './sign-wheel-zips.mjs'
 import { candidateFromEnvironment } from './desktop-candidate.mjs'
 import { sanitizeTree } from './sanitize-pe-signatures.mjs'
+import { repairCuaSwiftRpaths } from './repair-cua-swift-rpaths.mjs'
 
 /**
  * Put our full-resolution `assets/icon.icns` back as the bundle's legacy icon.
@@ -82,6 +83,8 @@ export default async function afterPack(context) {
     await restoreLegacyMacIcon(context)
     await restoreMacLocaleMarkers(context)
     if (fs.existsSync(payload)) {
+      const repairedCua = repairCuaSwiftRpaths(payload)
+      if (repairedCua) console.log(`[after-pack] repaired build-machine Swift rpaths in ${repairedCua} CUA binaries`)
       const entitlements = path.join(import.meta.dirname, '..', 'electron', 'entitlements.mac.inherit.plist')
       const candidate = candidateFromEnvironment(path.resolve(import.meta.dirname, '../../..'))
       const signing = candidate ? { identity: '-', keychain: null, timestamp: 'none' }
