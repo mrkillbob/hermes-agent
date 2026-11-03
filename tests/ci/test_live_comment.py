@@ -175,3 +175,22 @@ def test_runs_all_completed_empty_list_is_not_done():
 
 def test_runs_all_completed_missing_status_is_not_done():
     assert not _mod.runs_all_completed([{}])
+
+
+@pytest.mark.parametrize("repository_id, repository, head_repository, event, expected", [
+    ("1341623970", "Coding-Sensations/hermes-agent", "Coding-Sensations/hermes-agent", "pull_request", False),
+    ("1341623970", "future-owner/hermes-agent", "future-owner/hermes-agent", "pull_request", False),
+    ("1024554267", "NousResearch/hermes-agent", "NousResearch/hermes-agent", "pull_request", True),
+    ("1024554267", "NousResearch/hermes-agent", "contributor/hermes-agent", "pull_request", False),
+    ("1024554267", "NousResearch/hermes-agent", "NousResearch/hermes-agent", "push", False),
+])
+def test_comment_job_admission_preserves_upstream_and_excludes_opted_out_fork(
+    repository_id, repository, head_repository, event, expected,
+):
+    yaml = pytest.importorskip("hermes_yaml")
+    root = Path(__file__).resolve().parents[2]
+    doc = yaml.safe_load((root / ".github/workflows/ci-review-comment.yml").read_text())
+    context = {"github": {"repository_id": repository_id, "repository": repository,
+                          "event": {"workflow_run": {"event": event,
+                                    "head_repository": {"full_name": head_repository}}}}}
+    assert bool(gha.evaluate(doc["jobs"]["comment"]["if"], context)) is expected
