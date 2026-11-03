@@ -11,7 +11,7 @@ import { $settledClarifyResults, type ClarifyRequest, clearClarifyRequest, setCl
 import { $gateway } from '@/store/gateway'
 import { answerParkedCard } from '@/store/parked-card-answers'
 import { rememberServerRequest, resetServerRequestsForTests } from '@/store/server-requests'
-import { $activeSessionId } from '@/store/session'
+import { $activeSessionId, $messages } from '@/store/session'
 
 import { ClarifyTool } from './index'
 
@@ -30,7 +30,12 @@ vi.mock('@/store/gateway', async importActual => ({
   requestGatewayForAgent: gatewayMocks.requestGatewayForAgent
 }))
 
-vi.mock('@assistant-ui/react', () => ({ useAuiState: () => true }))
+vi.mock('@assistant-ui/react', () => ({
+  useAuiState: (select: (state: unknown) => unknown) => select({
+    message: { id: 'm1', status: { type: 'running' }, content: [] },
+    thread: { isRunning: true, messages: [] }
+  })
+}))
 
 beforeAll(() => {
   // jsdom has no Web Animations API; a demoted row's enter animation would throw.
@@ -42,6 +47,7 @@ afterEach(() => {
   clearClarifyRequest()
   resetServerRequestsForTests()
   $activeSessionId.set(null)
+  $messages.set([])
   $gateway.set(null)
   $settledClarifyResults.set({})
   vi.clearAllMocks()
@@ -73,7 +79,7 @@ function rowProps(part: ClarifyPart): ToolCallMessagePartProps & { clarifyReques
     clarifyRequestId: part.clarifyRequestId,
     isError: false,
     respondToApproval: vi.fn(),
-    result: undefined,
+    result: part.result,
     resume: vi.fn(),
     status: { type: 'running' },
     toolCallId: part.toolCallId,
@@ -83,7 +89,7 @@ function rowProps(part: ClarifyPart): ToolCallMessagePartProps & { clarifyReques
 }
 
 function clarifyCall(toolCallId: string, questions: (typeof TARGET)[]) {
-  return { args: { questions }, toolCallId, toolName: 'clarify', type: 'tool-call' } as never
+  return { args: { questions }, toolCallId, toolName: 'clarify', type: 'tool-call' } as ClarifyPart
 }
 
 const clarifyParts = (messages: ChatMessage[]) =>
@@ -126,10 +132,12 @@ function transcriptOf(rows: ReturnType<typeof clarifyCall>[][], { pending }: { p
 
     if (!chatMessageArraysEquivalent(next, shown)) {
       shown = next
+      $messages.set(shown)
     }
   }
 
   $activeSessionId.set('session-1')
+  $messages.set(shown)
   $gateway.set({ request } as never)
 
   return {
@@ -162,6 +170,41 @@ function transcriptOf(rows: ReturnType<typeof clarifyCall>[][], { pending }: { p
 }
 
 describe('a clarify asked one card per question', () => {
+  it('does not let a settled binding suppress the remaining legacy live row', () => {
+    const chat = transcript([
+      { ...clarifyCall('settled-call', [TARGET]), clarifyRequestId: 'legacy-request', result: 'previous answer' },
+      clarifyCall('legacy-live-call', [TARGET])
+    ])
+
+    setClarifyRequest(card('legacy-request', TARGET))
+    const view = render(tree(chat.rows()))
+    expect(liveCards(view.container)).toBe(1)
+    expect(view.container.querySelector('form[data-clarify-request-id]')?.getAttribute('data-clarify-tool-call-id'))
+      .toBe('legacy-live-call')
+  })
+
+  it('keeps one owner when a matching unbound row arrives after the request was parked', () => {
+    const chat = transcript([clarifyCall('bound-call', [TARGET])])
+    chat.park(card('parked-request', TARGET))
+    const view = render(tree(chat.rows()))
+    act(() => chat.add(clarifyCall('late-unbound-call', [TARGET])))
+    view.rerender(tree(chat.rows()))
+
+    const owners = [...view.container.querySelectorAll('form[data-clarify-request-id]')].map(form => ({
+      session: form.getAttribute('data-clarify-session-id'),
+      message: form.getAttribute('data-clarify-message-id'),
+      call: form.getAttribute('data-clarify-tool-call-id'),
+      binding: form.getAttribute('data-clarify-bound-request-id'),
+      request: form.getAttribute('data-clarify-request-id')
+    }))
+
+    expect(owners, JSON.stringify(owners)).toEqual([
+      expect.objectContaining({ session: 'session-1', call: 'bound-call', binding: 'parked-request', request: 'parked-request' })
+    ])
+    expect(liveCards(view.container)).toBe(1)
+    expect(screen.getAllByRole('button', { name: /staging/ })).toHaveLength(1)
+  })
+
   it('shows the next card after the chat bar answered the first, and the chat bar answers that card', async () => {
     const chat = transcript([clarifyCall('call-1', [TARGET, REGION])])
     chat.park(card('prompt-1', TARGET))

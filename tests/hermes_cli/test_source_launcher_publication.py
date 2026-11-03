@@ -523,6 +523,84 @@ def test_external_interpreter_keeps_its_owned_dependencies(tmp_path, monkeypatch
 
 @pytest.mark.platforms("posix")
 @pytest.mark.spawns_gateway_lookalike
+@pytest.mark.parametrize("layout", ["sealed", "source", "development", "external"])
+@pytest.mark.parametrize("timestamped", [False, True])
+def test_installation_command_boots_gateway_dependencies(tmp_path, monkeypatch, layout, timestamped):
+    """A sealed tool store must not imply that a mutable source launcher exists."""
+    from hermes_cli import gateway, gateway_launchd
+
+    repo, home, interpreter = fixture_tree(tmp_path, monkeypatch)
+    if layout in {"sealed", "development"}:
+        (repo / "install-stamp.json").write_text(json.dumps({
+            "payload": "bundled", "distribution": "desktop-app", "updateMechanism": "external",
+        }), encoding="utf-8")
+    if layout == "development":
+        (repo / ".git").mkdir()
+    if layout == "sealed":
+        environment = tmp_path / "payload-deps"
+        (tmp_path / "manifest.json").write_text(json.dumps({
+            "repo": repo.name, "venv": environment.name,
+            "store": (home / "tools").relative_to(tmp_path).as_posix(),
+        }), encoding="utf-8")
+        site = site_packages(environment)
+        site.mkdir(parents=True)
+        # .pth activation is part of the bundle launch contract, not just PYTHONPATH.
+        editable = tmp_path / "editable-member"
+        editable.mkdir()
+        (editable / "selected_probe.py").write_text("VALUE = 'sealed'\n", encoding="utf-8")
+        (site / "member.pth").write_text(str(editable) + "\n", encoding="utf-8")
+    else:
+        select_generation(repo, "current", layout)
+        if layout in {"source", "development"}:
+            _launchers.ensure_install_launchers(repo, repo / ".hermes/bin")
+        else:
+            (home / "tools/facts.json").unlink()
+            interpreter = Path(sys.executable)
+
+    monkeypatch.setattr(gateway, "PROJECT_ROOT", repo)
+    monkeypatch.setattr(gateway, "get_python_path", lambda: str(interpreter))
+    monkeypatch.setattr(gateway, "_profile_arg", lambda: "")
+    if timestamped:
+        command = gateway_launchd._timestamped_stderr_gateway_command(
+            home / "logs/gateway.error.log", external_supervisor=True)
+    else:
+        command = _launchers.installation_command(
+            repo, ["gateway", "run", "--external-supervisor"], python=interpreter)
+    assert Path(command[0]).is_file(), f"{layout} service references a missing executable"
+    result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True,
+                            encoding="utf-8", timeout=30, check=False)
+    assert result.returncode == 7, result.stdout + result.stderr
+    # The real timestamp wrapper prefixes the fixture entry point's JSON line.
+    receipt = json.loads(result.stdout[result.stdout.index("{"):])
+    assert receipt["value"] == layout
+    assert receipt["argv"] == ["gateway", "run", "--external-supervisor"]
+    assert Path(receipt["home"]) == home
+    assert Path(receipt["exe"]).samefile(interpreter)
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("development", [False, True])
+def test_service_preparation_preserves_sealed_tree(tmp_path, monkeypatch, development):
+    from hermes_cli import gateway
+
+    repo, home, _ = fixture_tree(tmp_path, monkeypatch)
+    (repo / "install-stamp.json").write_text(json.dumps({
+        "payload": "bundled", "distribution": "desktop-app", "updateMechanism": "external",
+    }), encoding="utf-8")
+    if development:
+        (repo / ".git").mkdir()
+    monkeypatch.setattr(gateway, "PROJECT_ROOT", repo)
+    monkeypatch.setattr(gateway, "get_hermes_home", lambda: home)
+    before = sorted(str(path.relative_to(repo)) for path in repo.rglob("*"))
+    gateway._prepare_service_launcher()
+    if development:
+        assert (repo / ".hermes/bin/hermes").is_file()
+    else:
+        assert sorted(str(path.relative_to(repo)) for path in repo.rglob("*")) == before
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.spawns_gateway_lookalike
 def test_service_survives_python_tool_replacement(tmp_path, monkeypatch):
     from hermes_cli import gateway
 
