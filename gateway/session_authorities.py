@@ -24,6 +24,9 @@ class SessionAuthorities:
     """Registry of authorities keyed by ``hermes_home_key(home)``."""
 
     def __init__(self, launch_home, *, multiplexed=False):
+        import secrets
+        from gateway.session_binding_generation import BindingGenerations
+        self._binding_generations = BindingGenerations(secrets.token_hex(16))
         self.launch_key = hermes_home_key(launch_home)
         self._by_key: dict[str, object] = {}
         self._names: dict[str, str | None] = {}
@@ -38,20 +41,24 @@ class SessionAuthorities:
         key = hermes_home_key(home)
         if key in self._by_key:
             raise RuntimeError(f'duplicate session authority for {home}')
-        self._by_key[key] = authority
-        self._names[key] = name
-        if authority is None:
-            self._starting[key] = asyncio.Event()
-        if key != self.launch_key:
-            self.multiplexed = True
+        from gateway.session_binding_registry import binding_change
+        with binding_change(self, key, authority):
+            self._by_key[key] = authority
+            self._names[key] = name
+            if authority is None:
+                self._starting[key] = asyncio.Event()
+            if key != self.launch_key:
+                self.multiplexed = True
 
     def replace(self, home, authority) -> None:
         """Fill the slot reserved by ``add(home, None, name=...)`` once the authority exists."""
         key = hermes_home_key(home)
         if key not in self._by_key or self._by_key[key] is not None:
             raise RuntimeError(f'no reserved session authority slot for {home}')
-        self._by_key[key] = authority
-        self._end_start(key)
+        from gateway.session_binding_registry import binding_change
+        with binding_change(self, key, authority):
+            self._by_key[key] = authority
+            self._end_start(key)
 
     def remove(self, home):
         """Drop *home*'s slot (a parked boot, a hot-unserved profile); returns the authority or None.
@@ -59,9 +66,11 @@ class SessionAuthorities:
         key = hermes_home_key(home)
         if key == self.launch_key:
             raise RuntimeError('the launch session authority cannot be removed')
-        self._names.pop(key, None)
-        self._end_start(key)
-        return self._by_key.pop(key, None)
+        from gateway.session_binding_registry import binding_change
+        with binding_change(self, key, None):
+            self._names.pop(key, None)
+            self._end_start(key)
+            return self._by_key.pop(key, None)
 
     def _end_start(self, key) -> None:
         started = self._starting.pop(key, None)

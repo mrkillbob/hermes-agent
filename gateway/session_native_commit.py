@@ -6,7 +6,7 @@ data cannot install an issuer. Native identity comes from the existing registere
 AuthorityConnection, not a callback or a supplied authenticated=True field.
 """
 import asyncio
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from functools import wraps
 import os
@@ -55,6 +55,7 @@ class NativeCommitIssuer:
         self.actor, self.authority, self.transport = connection.actor, connection.authority, connection.transport
         self.profile_id, self.instance_id = self.authority.profile_id, self.authority.instance_id
         self.principal_id, self.transport_id = self.actor.subject, self.actor.transport_id
+        self.registry_binding = _registry_snapshot(self.authority)
         self.process = os.getpid()
         self._gate, self._state = Lock(), Lock()
         self._closing, self._active = False, False
@@ -77,6 +78,7 @@ class NativeCommitIssuer:
         if type(c) is not AuthorityConnection or os.getpid() != self.process:
             _deny()
         actor, authority, identity = c.actor, c.authority, c._identity
+        _check_registry(self.registry_binding, authority)
         if (actor is not self.actor or authority is not self.authority or c.transport is not self.transport
                 or actor.subject != self.principal_id or actor.transport_id != self.transport_id
                 or authority.profile_id != self.profile_id or authority.instance_id != self.instance_id
@@ -228,6 +230,46 @@ def native_registration_change(authority, actor):
             yield
         if actor.transport_id not in getattr(authority, '_native_legacy_transports', {}):
             getattr(authority, '_native_commit_issuers', {}).pop(actor.transport_id, None)
+
+
+def _registry_snapshot(authority):
+    binding = getattr(authority, '_binding_generation', None)
+    registry = getattr(authority, '_binding_registry', None)
+    if binding is None or registry is None:
+        return None  # existing transport-only users do not acquire session permission
+    owner, key, slot = binding
+    return owner, key, slot, slot.revision, slot.context, registry, owner.incarnation
+
+
+def _check_registry(snapshot, authority):
+    """Worker-safe snapshot check under native state/gate, never owner-loop APIs.
+
+    Registry mutations acquire this issuer's gate before changing these fields.
+    This does not fence independent session, membership, route or admin writers.
+    """
+    if snapshot is None:
+        return
+    owner, key, slot, revision, context, registry, incarnation = snapshot
+    if (getattr(authority, '_binding_generation', None) != (owner, key, slot)
+            or owner.slots.get(key) is not slot or slot.authority is not authority
+            or slot.revision != revision or slot.context != context
+            or context != (authority.profile_id, authority.instance_id, authority.epoch)
+            or slot.busy is not None or slot.failed or owner.incarnation != incarnation
+            or registry._by_key.get(key) is not authority):
+        _deny()
+
+
+@contextmanager
+def native_authority_change(authority):
+    """Close ALL intake before acquiring any gate; busy means no publication."""
+    issuers = sorted(getattr(authority, '_native_commit_issuers', {}).values(),
+                     key=lambda issuer: issuer.transport_id)
+    for issuer in issuers:
+        issuer.begin_close()
+    with ExitStack() as stack:
+        for issuer in issuers:
+            stack.enter_context(issuer.registration_change(issuer.actor))
+        yield
 
 
 def register_issuer(connection):

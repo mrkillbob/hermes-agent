@@ -1050,6 +1050,11 @@ class SessionAuthority:
             if any(row['status'] == 'unknown' for row in pending):
                 raise RuntimeStoreError('unknown_execution')
             first = next((row for row in pending if row['status'] == 'queued'), None)
+            if first is not None and 'curated_reference_v1' in first['payload']:
+                # No qualified consumed-context executor exists. Never turn lost or
+                # restarted reference metadata into an ordinary prompt/model call.
+                await self._refuse_head(ref, first['admission_id'], 'reference_delivery_unavailable')
+                return False, first
             from gateway.config import Platform
             if live.source.platform == Platform.LOCAL:
                 # A reasoning command or a model pick made while the previous turn ran lands here, at the
