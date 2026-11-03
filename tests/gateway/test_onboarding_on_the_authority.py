@@ -60,8 +60,6 @@ async def _desktop(tmp_path, monkeypatch, turns):
                 "native_bootstrap": True}
     transport.desktop_local = True  # the Desktop's accepted ``client.capabilities {desktop_local}``
     connection = AuthorityConnection(authority, transport, identity)
-    from gateway.session_local_migration import bind_native_transport
-    bind_native_transport(authority, connection.actor, identity)
     return SimpleNamespace(authority=authority, connection=connection, transport=transport, db=store._db)
 
 
