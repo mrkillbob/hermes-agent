@@ -217,8 +217,8 @@ def _finish(proc: subprocess.Popen, timeout: float = 120) -> tuple[int, str]:
 
 
 @pytest.fixture
-def rig(tmp_path):
-    return Rig(tmp_path)
+def rig(upgrade_case_root):
+    return Rig(upgrade_case_root)
 
 
 def test_two_homes_cannot_update_one_checkout_at_once(rig):
