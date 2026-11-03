@@ -630,6 +630,7 @@ def _run_one_file(
 # run to rediscover the race.
 _FLAKY_RESULTS: list[tuple[Path, str]] = []
 _flaky_lock = threading.Lock()
+_STATUS_JOURNAL = None
 
 
 def _run_one_file_once(
@@ -670,6 +671,12 @@ def _run_one_file_once(
     env["TMPDIR"] = temproot
 
     subproc_start = time.monotonic()
+    checkpoint = _STATUS_JOURNAL.start(file, repo_root) if _STATUS_JOURNAL else None
+
+    def status(phase, exit_code=None):
+        if checkpoint is not None:
+            _STATUS_JOURNAL.emit(*checkpoint, phase, time.monotonic() - subproc_start, exit_code)
+
     from scripts.runner_lifetime import spawn_pytest
 
     proc, pgid = spawn_pytest(
@@ -681,7 +688,9 @@ def _run_one_file_once(
     try:
         output, _ = proc.communicate(timeout=file_timeout)
         rc = proc.returncode
+        status('output_collected', rc)
     except subprocess.TimeoutExpired:
+        status('timed_out', proc.returncode)
         _kill_tree(proc, pgid=pgid)
         try:
             output, _ = proc.communicate(timeout=10)
@@ -693,6 +702,7 @@ def _run_one_file_once(
             f"process tree SIGKILL'd)\n{output}"
         )
     except BaseException:
+        status('interrupted')
         # KeyboardInterrupt / runner crash — make sure no zombie
         # grandchildren outlive us.
         _kill_tree(proc, pgid=pgid)
@@ -704,12 +714,14 @@ def _run_one_file_once(
 
         output +=  "\n"
     finally:
+        status('scratch_cleanup_started')
         _kill_detached_leftovers(temproot)
         # Delete the temp root for this attempt. Nothing reads it after the
         # subprocess exits. More than 3000 of them fill the disk of the
         # runner over one suite. Permission fixtures leave read-only dirs
         # behind; make them writable and retry instead of skipping them.
         _rmtree_force(temproot)
+        status('scratch_cleanup_complete')
 
     if rc not in (0, 5) and not output.strip():
         output = f"pytest child exited {rc} (0x{rc & 0xffffffff:08x}) with no output: {file}\n"
@@ -1240,7 +1252,28 @@ def _summary_notes(
     return notes
 
 
+def _parse_slice(explicit_slice):
+    """Consume the slice before discovery and keep nested runners unsliced."""
+    slice_raw = explicit_slice or os.environ.get("HERMES_TEST_SLICE")
+    # Read once, here: test processes inherit this env, and a runner they start (the
+    # runner's own probe tests) must run its whole file set, not "its" slice of it.
+    os.environ.pop("HERMES_TEST_SLICE", None)
+    slice_index: int | None = None
+    slice_count: int = 1
+    if slice_raw:
+        try:
+            idx_s, count_s = slice_raw.split("/", 1)
+            slice_index = int(idx_s)
+            slice_count = int(count_s)
+        except (ValueError, AttributeError):
+            print(f"error: --slice must be I/N (e.g. 1/4), got: {slice_raw!r}", file=sys.stderr)
+            sys.exit(2)
+
+    return slice_index, slice_count
+
+
 def main() -> int:
+    global _STATUS_JOURNAL
     _make_stdio_glyph_safe()
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -1357,6 +1390,8 @@ def main() -> int:
             "separator is passed through to each per-file pytest invocation."
         ),
     )
+    parser.add_argument('--status-file', type=Path,
+                        help='fresh body-free JSONL checkpoint file outside disposable test roots')
     # Split argv into "our flags + positional paths" vs "pytest passthrough".
     #
     # Two ways to pass args through to the per-file pytest invocation:
@@ -1376,7 +1411,7 @@ def main() -> int:
     OUR_FLAGS = {
         "-h", "--help", "-j", "--jobs", "--paths", "--include-integration",
         "--file-timeout", "--file-retries", "--slice", "--generate-slices", "--files",
-        "--files-from", "--fail-on-skip",
+        "--files-from", "--fail-on-skip", "--status-file",
     }
     # pytest short flags that consume the NEXT token as their value.
     PYTEST_VALUE_FLAGS = {"-k", "-m", "-p", "-o", "-c", "-r", "-W"}
@@ -1477,22 +1512,7 @@ def main() -> int:
     # intuitive (``run_tests.sh tests/foo.py -q -- --tb=long`` → ``-q --tb=long``).
     pytest_passthrough = bare_passthrough + explicit_passthrough
 
-    # Parse --slice (or HERMES_TEST_SLICE) early so we can exit on bad input
-    # before doing any expensive discovery.
-    slice_raw = args.slice or os.environ.get("HERMES_TEST_SLICE")
-    # Read once, here: test processes inherit this env, and a runner they start (the
-    # runner's own probe tests) must run its whole file set, not "its" slice of it.
-    os.environ.pop("HERMES_TEST_SLICE", None)
-    slice_index: int | None = None
-    slice_count: int = 1
-    if slice_raw:
-        try:
-            idx_s, count_s = slice_raw.split("/", 1)
-            slice_index = int(idx_s)
-            slice_count = int(count_s)
-        except (ValueError, AttributeError):
-            print(f"error: --slice must be I/N (e.g. 1/4), got: {slice_raw!r}", file=sys.stderr)
-            sys.exit(2)
+    slice_index, slice_count = _parse_slice(args.slice)
 
     repo_root = Path(__file__).resolve().parent.parent
 
@@ -1631,6 +1651,9 @@ def main() -> int:
     if "HERMES_TEST_SCRATCH_ROOT" not in os.environ:
         _sweep_killed_run_roots(_runner_scratch_root())
 
+    if args.status_file is not None:
+        from scripts.test_status_journal import StatusJournal
+        _STATUS_JOURNAL = StatusJournal(args.status_file)
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         # Duration cache for the timeout scaler: known-slow files get
         # proportional headroom instead of a false timeout-kill under
