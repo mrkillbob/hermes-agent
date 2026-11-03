@@ -159,7 +159,9 @@ def selected_files(step: dict, ctx: dict, repo: Path) -> set[str]:
         i = 0
         while i < len(args):
             arg = args[i]
-            if arg == "--files":
+            if arg == "--status-file":
+                i += 1
+            elif arg == "--files":
                 i += 1
                 paths.extend(args[i].split(os.pathsep))
             elif arg == "-m":
