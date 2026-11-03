@@ -1,4 +1,4 @@
-"""Same-process native TRANSPORT lifetime leases for the actual store commit.
+"""Same-process native TRANSPORT lifetime leases for commits and physical workers.
 
 No note/session permission, registry witness, device mapping, RPC, or distributed
 hold_current is supplied. Only trusted host code calls issue; request/model/note
@@ -41,6 +41,19 @@ class NativeCommitOperation:
 
     def receipt(self):
         return self.issuer.receipt(self)
+
+
+class NativeSendOperation:
+    """HOST-only original physical-worker hold; neither SQL nor send attestation."""
+    def __init__(self, issuer, scope, expires_at):
+        self.issuer, self.scope, self.expires_at = issuer, scope, expires_at
+        self.state, self.lease_released = 'prepared', False
+
+    def hold(self):
+        return self.issuer.hold_send(self)
+
+    def receipt(self):
+        return self.issuer.send_receipt(self)
 
 
 class NativeCommitIssuer:
@@ -94,6 +107,13 @@ class NativeCommitIssuer:
 
     def issue(self, *, operation_id, payload_sha256, lifetime_s=60):
         """HOST ONLY. Native peer identity does not confer note/session permission."""
+        return self._issue(NativeCommitOperation, operation_id, payload_sha256, lifetime_s)
+
+    def issue_send(self, *, operation_id, payload_sha256, lifetime_s=60):
+        """HOST ONLY; entry expiry is not a timer that releases a running worker."""
+        return self._issue(NativeSendOperation, operation_id, payload_sha256, lifetime_s)
+
+    def _issue(self, kind, operation_id, payload_sha256, lifetime_s):
         self._check_process()
         if (type(operation_id) is not str or not 1 <= len(operation_id) <= 128
                 or any(not 32 < ord(char) < 127 for char in operation_id)
@@ -106,14 +126,14 @@ class NativeCommitIssuer:
             self._current()
             existing = self._operations.get(operation_id)
             if existing is not None:
-                if existing.scope.declared_payload_sha256 != payload_sha256:
+                if type(existing) is not kind or existing.scope.declared_payload_sha256 != payload_sha256:
                     _deny('admission_conflict')
                 return existing  # never mint a replacement for committed/unknown work
             if len(self._operations) >= 64:
                 _deny('native_commit_capacity')
             c = self.connection
             scope = NativeCommitScope(c.actor.subject, c.actor.transport_id, operation_id, payload_sha256)
-            operation = NativeCommitOperation(self, scope, time.monotonic() + lifetime_s)
+            operation = kind(self, scope, time.monotonic() + lifetime_s)
             self._operations[operation_id] = operation
             return operation
 
@@ -156,19 +176,79 @@ class NativeCommitIssuer:
                     operation.guard_completed = True
                     operation.state = 'guard-completed'
         finally:
-            with self._state:
-                self._active = False
-                waiters, self._waiters = self._waiters, []
-                self._gate.release()
-            for loop, waiter in waiters:
-                def finish(future=waiter):
-                    if not future.done():
-                        future.set_result(None)
+            self._release_active()
+
+    def _release_active(self, send=None):
+        with self._state:
+            if send is not None:
+                send.lease_released = True
+            self._active = False
+            waiters, self._waiters = self._waiters, []
+            self._gate.release()
+        for loop, waiter in waiters:
+            def finish(future=waiter):
+                if not future.done():
+                    future.set_result(None)
+            try:
+                loop.call_soon_threadsafe(finish)
+            except RuntimeError:
+                if not loop.is_closed():
+                    raise
+
+    @contextmanager
+    def hold_send(self, operation):
+        """Hold INSIDE the physical worker through transport cleanup, never the waiter.
+
+        Enter without a DB transaction, selection lock or owner-loop callback.
+        Async cancellation/expiry must not force-release an underlying worker.
+        Record/session/route permission and actual input/result evidence belong to
+        the consuming owner; this primitive supplies transport lifetime only.
+        """
+        self._check_process()
+        with self._state:
+            self._current()
+            if (self._closing or type(operation) is not NativeSendOperation
+                    or operation.issuer is not self
+                    or self._operations.get(operation.scope.operation_id) is not operation
+                    or operation.state != 'prepared' or time.monotonic() >= operation.expires_at):
+                _deny()
+            if not self._gate.acquire(blocking=False):
+                _deny('native_commit_busy')
+            self._active, operation.state = True, 'active'
+        try:
+            try:
+                yield
+            except BaseException:
+                with self._state:
+                    operation.state = 'unknown'
+                raise
+            else:
+                with self._state:
+                    operation.state = 'released'
+        finally:
+            self._release_active(operation)
+
+    def send_receipt(self, operation):
+        self._check_process()
+        with self._state:
+            if (type(operation) is not NativeSendOperation or operation.issuer is not self
+                    or self._operations.get(operation.scope.operation_id) is not operation):
+                _deny()
+            current = False
+            if (operation.state == 'released' and operation.lease_released
+                    and not self._closing and time.monotonic() < operation.expires_at):
                 try:
-                    loop.call_soon_threadsafe(finish)
-                except RuntimeError:
-                    if not loop.is_closed():
-                        raise
+                    self._current()
+                except RuntimeStoreError:
+                    pass
+                else:
+                    current = True
+            return {'schema': 'native-transport-worker-v1', **asdict(operation.scope),
+                    'state': operation.state, 'lease_released': operation.lease_released,
+                    'current_transport': current, 'authorization_scope': 'transport-lifetime-only',
+                    'payload_content_attested': False, 'http_response_attested': False,
+                    'transaction_commit_attested': False, 'session_acknowledged': False,
+                    'distributed_fence': False}
 
     def begin_close(self):
         self._check_process()

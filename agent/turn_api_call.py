@@ -76,6 +76,8 @@ def perform_api_call(
     interrupted: Any,
 ) -> ApiCallVerdict:
     """Issue the request (see ``_should_stream`` for the streaming decision)."""
+    from agent.native_send_worker import capture_native_send
+    capture_native_send(agent)
     response = None
 
     def _verdict(action: str) -> ApiCallVerdict:
