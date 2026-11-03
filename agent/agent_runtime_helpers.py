@@ -2451,9 +2451,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                  skip_tool_request_middleware: bool = False,
                  tool_request_middleware_trace: Optional[list[dict[str, Any]]] = None,
                  skip_tool_execution_middleware: bool = False) -> str:
-    """Invoke a single tool (agent-level or registry-dispatched) and return the result string;
-    no display logic. Used by the concurrent path; the sequential path keeps its own inline
-    invocation for display."""
+    """Invoke one tool; retained and local-text restrictions precede observers."""
+    from agent.diagnostic_reference_policy import require_agent_tools_allowed
+    require_agent_tools_allowed(agent)
     from agent.inline_tool_executors import (
         InlineToolContext, apply_transform_tool_result, emit_terminal_post_tool_call,
         resolve_invoke_tool_executor, tool_hook_ids

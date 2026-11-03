@@ -1612,8 +1612,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     """Execute tool calls concurrently; results are appended in original call order.
     ``finalize=False`` skips end-of-batch budget enforcement and /steer injection (the
     segmented dispatcher owns turn-end work)."""
-    from agent.local_text_policy import require_tools_allowed
-    require_tools_allowed()
+    from agent.diagnostic_reference_policy import require_agent_tools_allowed
+    require_agent_tools_allowed(agent)
     tool_calls = assistant_message.tool_calls
     num_tools = len(tool_calls)
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
@@ -1891,8 +1891,8 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
 
 
 def execute_tool_calls_sequential(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0, *, finalize: bool = True) -> None:
-    from agent.local_text_policy import require_tools_allowed
-    require_tools_allowed()
+    from agent.diagnostic_reference_policy import require_agent_tools_allowed
+    require_agent_tools_allowed(agent)
     from types import SimpleNamespace
     from agent.terminal_approval_batch import terminal_approval_batch, terminal_approval_runs
     for calls in terminal_approval_runs(agent, assistant_message.tool_calls):
@@ -1908,8 +1908,8 @@ def _execute_tool_calls_sequential(agent, assistant_message, messages: list, eff
     """Execute tool calls sequentially (single calls or interactive tools). ``finalize=False``
     skips end-of-batch budget enforcement and /steer injection (the segmented dispatcher
     owns turn-end work)."""
-    from agent.local_text_policy import require_tools_allowed
-    require_tools_allowed()
+    from agent.diagnostic_reference_policy import require_agent_tools_allowed
+    require_agent_tools_allowed(agent)
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
     tool_calls = assistant_message.tool_calls
 
@@ -1970,8 +1970,8 @@ def execute_tool_calls_segmented(agent, assistant_message, messages: list, effec
     boundaries exactly as fully-sequential execution. Turn-end work (budget + /steer) runs
     once here (segments run with ``finalize=False``); each segment executor checks the
     interrupt flag up front, so an interrupt drains later segments with one result per call."""
-    from agent.local_text_policy import require_tools_allowed
-    require_tools_allowed()
+    from agent.diagnostic_reference_policy import require_agent_tools_allowed
+    require_agent_tools_allowed(agent)
     from types import SimpleNamespace
 
     if segments is None:

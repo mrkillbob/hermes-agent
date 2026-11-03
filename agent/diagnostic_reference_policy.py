@@ -38,3 +38,15 @@ def lifecycle_export_messages(agent, messages):
     sessions keep the original object and their existing extraction behavior.
     """
     return [] if retained_policy(agent) is not None else messages
+
+
+def require_agent_tools_allowed(agent):
+    """Retained refusal, independent of thread context or current session label.
+
+    This only restricts an already sealed agent; it supplies no host permission,
+    note selection, executor registration or evidence of reference consumption.
+    """
+    from agent.local_text_policy import LocalTextRestriction, require_tools_allowed
+    if retained_policy(agent) is not None:
+        raise LocalTextRestriction('diagnostic_reference_tools_denied')
+    require_tools_allowed()
