@@ -555,6 +555,15 @@ def test_selection_receipt_does_not_require_the_native_jobs_venv(tmp_path):
     assert workflow_steps.selected_files(step, ctx, tmp_path) == {rel}
 
 
+def test_status_file_option_does_not_change_selected_files(tmp_path):
+    rel = "tests/test_owned.py"
+    test_file = tmp_path / rel
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("def test_owned(): pass\n", encoding="utf-8")
+    step = {"run": f'scripts/run_tests.sh --status-file "$RUNNER_TEMP/status.jsonl" --files "{rel}"'}
+    assert workflow_steps.selected_files(step, {}, tmp_path) == {rel}
+
+
 @_NATIVE_WINDOWS_TOO
 def test_replay_uses_executed_gate_output(monkeypatch):
     path = "apps/desktop/electron/handoff-result.ts"
