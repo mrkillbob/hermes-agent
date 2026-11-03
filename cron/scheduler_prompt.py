@@ -298,7 +298,7 @@ def _run_time_line() -> str:
     now = _hermes_now()
     offset = now.strftime("%z")
     zone = f" (UTC{offset[:3]}:{offset[3:]})" if offset else ""
-    return f"[CURRENT RUN TIME: {safe_strftime(now, '%A, %Y-%m-%d %H:%M %Z').strip()}{zone}]\n\n"
+    return f"[Current run time: {safe_strftime(now, '%A, %Y-%m-%d %H:%M %Z').strip()}{zone}]\n\n"
 
 
 def _build_job_prompt(

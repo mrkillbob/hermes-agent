@@ -17,7 +17,7 @@ def _prompt(job):
 
 def test_run_time_follows_the_hint_and_precedes_the_job_prompt():
     result = _prompt({"prompt": "Morning brief"})
-    line = "[CURRENT RUN TIME: Saturday, 2026-10-31 19:05 PDT (UTC-07:00)]"
+    line = "[Current run time: Saturday, 2026-10-31 19:05 PDT (UTC-07:00)]"
     assert line in result
     assert result.index("You are running as a scheduled cron job") < result.index(line)
     assert result.index(line) < result.index("Morning brief")
@@ -25,4 +25,4 @@ def test_run_time_follows_the_hint_and_precedes_the_job_prompt():
 
 def test_run_time_survives_the_skills_assembly_path():
     result = _prompt({"skills": ["ghost-skill"], "prompt": "go"})
-    assert "[CURRENT RUN TIME: Saturday, 2026-10-31 19:05 PDT (UTC-07:00)]" in result
+    assert "[Current run time: Saturday, 2026-10-31 19:05 PDT (UTC-07:00)]" in result

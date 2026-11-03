@@ -159,6 +159,10 @@ def apply_malloc_arena_max(config: Mapping[str, Any] | None = None) -> bool:
     if current is not None:
         target = _positive_c_int(current)
     else:
+        if config is None:
+            from hermes_cli.startup_hold import defer_maintenance
+            if defer_maintenance():
+                config = {}  # a held boot reads no private source (.env, config); the default cap applies
         target = _runtime_int(config, "malloc_arena_max", DEFAULT_MALLOC_ARENA_MAX)
         target = target if target is not None and target <= 2**31 - 1 else None
     if target is None:
