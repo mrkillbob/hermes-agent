@@ -163,21 +163,25 @@ def test_completed_upgrade_fixture_payload_does_not_accumulate(pytester, monkeyp
 
 
 @pytest.mark.parametrize("provider", ["rig", "world"])
-@pytest.mark.parametrize("phase", ["setup", "call", "teardown", "keep", "crash"])
+@pytest.mark.parametrize(
+    ("phase", "expected_outcomes"),
+    [
+        ("setup", {"errors": 1}),
+        ("call", {"failed": 1}),
+        ("teardown", {"passed": 1, "errors": 1}),
+        ("keep", {"passed": 1}),
+        ("crash", None),
+    ],
+    ids=["setup", "call", "teardown", "keep", "crash"],
+)
 def test_unsuccessful_or_explicitly_kept_fixture_evidence_remains(
-    pytester, monkeypatch, provider, phase
+    pytester, monkeypatch, provider, phase, expected_outcomes
 ):
     result, roots = _probe(pytester, monkeypatch, provider, phase)
-    if phase == "setup":
-        result.assert_outcomes(errors=1)
-    elif phase == "call":
-        result.assert_outcomes(failed=1)
-    elif phase == "teardown":
-        result.assert_outcomes(passed=1, errors=1)
-    elif phase == "keep":
-        result.assert_outcomes(passed=1)
-    else:
+    if expected_outcomes is None:
         assert result.ret == 17
+    else:
+        result.assert_outcomes(**expected_outcomes)
     if phase in ("setup", "call", "teardown"):
         result.stdout.fnmatch_lines([f"*synthetic {phase} refusal*"])
     assert len(roots) == 1
