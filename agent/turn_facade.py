@@ -11,6 +11,7 @@ from contextlib import suppress
 from typing import Any, Dict, Generator, List, Optional
 
 from agent.lazy_forward import forward as _forward
+from agent.diagnostic_reference_policy import sealed_output_boundary
 
 # Same logger name as the origin module so log records / caplog filters are unchanged.
 logger = logging.getLogger("run_agent")
@@ -19,6 +20,7 @@ logger = logging.getLogger("run_agent")
 class TurnFacadeMixin:
     """run_conversation()/chat() (see module docstring)."""
 
+    @sealed_output_boundary
     def run_conversation(
         self, user_message: Any, system_message: str | None=None,
         conversation_history: list[dict[str, Any]] | None=None, task_id: str | None=None,
@@ -32,6 +34,10 @@ class TurnFacadeMixin:
         prelude: Optional[Generator]=None,
     ) -> dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
+        from agent.diagnostic_reference_policy import (
+            exception_surface, project_result, release_turn_context, retained_policy,
+        )
+        diagnostic_policy = retained_policy(self)
         # A review shares this session_id for cache parity: fence review startup or interrupt
         # an admitted request and await its exit before opening live-turn instrumentation.
         # Foreground priority is retained if the review does not acknowledge within the bounded deadline
@@ -93,7 +99,7 @@ class TurnFacadeMixin:
                 relay_outcome = (
                     "cancelled" if admission.early_result.get("interrupted") else "timed_out"
                 )
-                return admission.early_result
+                return project_result(diagnostic_policy, admission.early_result)
             lease = admission.lease
             conversation_history = admission.conversation_history
 
@@ -163,6 +169,7 @@ class TurnFacadeMixin:
                         lease.stop_refresher()
             from agent.managed_request_budget import stamp_request_budget_result
             result = stamp_request_budget_result(result)
+            result = project_result(diagnostic_policy, result)
             terminal = result if isinstance(result, dict) else {}
             relay_outcome = (
                 "cancelled" if terminal.get("interrupted") is True
@@ -175,6 +182,7 @@ class TurnFacadeMixin:
                 finish_task_run(**task_context, result=result)
             return result
         except BaseException as exc:
+            public_error = exception_surface(diagnostic_policy, exc)
             if isinstance(exc, (KeyboardInterrupt, InterruptedError)) or (
                 type(exc).__name__ == "CancelledError"
             ):
@@ -187,7 +195,9 @@ class TurnFacadeMixin:
                 )
             if task_started and not task_finished:
                 task_finished = True
-                finish_task_run(**task_context, error=exc)
+                finish_task_run(**task_context, error=public_error)
+            if public_error is not exc:
+                return project_result(diagnostic_policy, {'failed': True})
             raise
         finally:
             try:
@@ -218,6 +228,7 @@ class TurnFacadeMixin:
                     # Balance note_turn_started so the idle queue's live-turn count cannot leak.
                     with suppress(Exception):
                         _review_queue.note_turn_finished()
+                    release_turn_context(self, diagnostic_policy)
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """Final response string of one turn; ``stream_callback`` receives each text delta."""
