@@ -162,10 +162,13 @@ def admission_gate(*, wait=False):
     fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     try:
         info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                or (info.st_dev, info.st_ino) != (path.stat().st_dev, path.stat().st_ino)
-                or not lock_fd(fd, wait=wait, timeout=5.0 if wait else 0.0)):
-            raise RuntimeError('startup_hold_writers_busy')
+        from hermes_cli.startup_hold_diagnostics import WriterRefusal
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise WriterRefusal('admission', 'unsafe_lock_file')
+        if (info.st_dev, info.st_ino) != (path.stat().st_dev, path.stat().st_ino):
+            raise WriterRefusal('admission', 'lock_identity_changed')
+        if not lock_fd(fd, wait=wait, timeout=5.0 if wait else 0.0):
+            raise WriterRefusal('admission', 'lock_unavailable')
         yield
     finally:
         os.close(fd)

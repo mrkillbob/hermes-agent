@@ -123,7 +123,11 @@ def cmd_gateway_drain(args):
     try:
         payload = execute(args)
     except (RuntimeError, OSError, ValueError, sqlite3.Error) as exc:
-        print(json.dumps({'error': _refusal_reason(exc)}))
+        from hermes_cli.startup_hold_diagnostics import public_writer_diagnostic
+        refusal = {'error': _refusal_reason(exc)}
+        if diagnostic := public_writer_diagnostic(exc):
+            refusal['diagnostic'] = diagnostic
+        print(json.dumps(refusal))
         raise SystemExit(6) from exc
     print(json.dumps(payload, sort_keys=True))
 
