@@ -126,7 +126,9 @@ def _probe(pytester, monkeypatch, provider: str, phase: str):
                 os._exit(17)
             if PHASE == "passed":
                 roots = [Path(p) for p in json.loads(MANIFEST.read_text())]
-                active = [p for p in roots if p.exists()]
+                # pytest can reuse a numbered name after the prior root is
+                # retired. Measure each live directory, not past allocations.
+                active = [p for p in dict.fromkeys(roots) if p.exists()]
                 retained = sum((p / "payload.bin").stat().st_size for p in active)
                 assert retained == {_PAYLOAD_BYTES}, (
                     "completed fixture payload accumulated: " + str(retained)
