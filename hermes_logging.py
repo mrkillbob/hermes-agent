@@ -260,6 +260,30 @@ def clear_session_context() -> None:
     _session_context.session_id = None
 
 
+def _diagnostic_record(record, *, queued=False):
+    """Withhold scoped message/error fields, and late extras before Hermes queues.
+
+    Read only an already loaded policy module: bootstrap logging must work without
+    the agent package. Custom factories/handlers/prints remain a separate boundary.
+    """
+    policy = sys.modules.get('agent.diagnostic_reference_policy')
+    active = getattr(policy, 'private_output_active', lambda: False)()
+    if not (active or getattr(record, '_diagnostic_reference_record', False)):
+        return None
+    if queued:
+        clean = logging.LogRecord('hermes.diagnostic_reference', record.levelno, '', 0,
+                                  '[diagnostic execution log withheld]', (), None)
+        clean.session_tag = ''
+        clean.hermes_home = getattr(record, 'hermes_home', '')
+        clean._diagnostic_reference_record = True
+        return clean
+    record.msg, record.args = '[diagnostic execution log withheld]', ()
+    record.exc_info = record.exc_text = record.stack_info = None
+    record.message = record.msg
+    record._diagnostic_reference_record = True
+    return record
+
+
 def _install_session_record_factory() -> None:
     """Replace the global LogRecord factory with one that adds ``session_tag``.
 
@@ -282,7 +306,8 @@ def _install_session_record_factory() -> None:
             record.hermes_home = str(get_hermes_home().resolve())  # type: ignore[attr-defined]
         except Exception:
             record.hermes_home = ""  # type: ignore[attr-defined]
-        return record
+        private = _diagnostic_record(record)
+        return private if private is not None else record
     _session_record_factory._hermes_session_injector = True  # type: ignore[attr-defined]
     logging.setLogRecordFactory(_session_record_factory)
 
@@ -810,6 +835,9 @@ class _NonFormattingQueueHandler(QueueHandler):
     """
 
     def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        private = _diagnostic_record(record, queued=True)
+        if private is not None:
+            return private
         return copy.copy(record)
 
 
