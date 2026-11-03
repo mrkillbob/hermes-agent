@@ -69,6 +69,8 @@ class SelectionAdmission:
             'request_id': selected.request_id, 'selection_sha256': exact_digest,
             'registry_incarnation': observation.metadata_incarnation,
             'registry_revision': observation.metadata_revision}}
+        if selected.execution is not None:
+            self.payload[MARKER]['consumption_intent_sha256'] = selected.execution.intent_digest
         self.digest = admission_fingerprint(canonical_target=f.logical_session_id,
             payload={'input': self.payload, 'intent': 'queue'})
         self.native = selected.connection.issue_native_commit(operation_id='curated:' + decision_id,
@@ -103,6 +105,8 @@ class SelectionAdmission:
                 if (selected.status != 'admitting' or time.monotonic() >= selected.expires_at
                         or selected.admission is not self):
                     _deny()
+                if selected.execution is not None:
+                    selected.execution.current(statuses=('admitting',))
                 if (broker.authority.sessions.get(ref.session_id) is not selected.live
                         or not any(member is selected.connection.actor
                                    for member in selected.live.subscribers.values())):
@@ -129,6 +133,11 @@ class SelectionAdmission:
             self.selected.admission_id = row['admission_id']
             if self.selected.status == 'admitting':
                 self.selected.status = 'admitted'
+            if self.selected.execution is not None:
+                authority = self.broker.authority
+                if not hasattr(authority, '_reference_executions'):
+                    authority._reference_executions = {}
+                authority._reference_executions[row['admission_id']] = self.selected.execution
         return row
 
     def check_row(self, row):
@@ -252,4 +261,12 @@ async def revoke_and_wait(broker, connection, decision_id, request_id):
         permit = selected.admission
     if permit is not None:
         await permit.quiescent()
+    execution = selected.execution
+    if execution is not None and execution.native_send is not None:
+        await execution.native_send.issuer.quiescent()
+    if execution is not None:
+        from gateway.session_learning_cache import release_pin
+        with broker._gate:
+            execution.status, execution.history = 'revoked', []
+        release_pin(execution)
     return {'decision_id': decision_id, 'status': 'revoked', 'session_acknowledged': False}

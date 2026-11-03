@@ -224,6 +224,9 @@ class ClientLifecycleMixin:
         ctx = self._client_log_context()
         # Force-close TCP sockets first (no CLOSE-WAIT accumulation), then the graceful SDK close.
         force_closed = self._force_close_tcp_sockets(client)
+        if reason == 'private_reference_cleanup':
+            client.close()  # strict owner-thread acknowledgment; private caller handles errors
+            return
         try:
             client.close()
             logger.info("OpenAI client closed (%s, shared=%s, tcp_force_closed=%d) %s", reason, shared, force_closed, ctx)

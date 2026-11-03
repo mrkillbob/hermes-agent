@@ -17,6 +17,7 @@ from gateway.config import Platform
 from gateway.session import SessionSource, build_session_context_prompt
 from gateway.session_prompt_pin import PROMPT_PIN_VERSION, sanitize_prompt_pin
 from gateway.run_shutdown import _log_suppressed
+from gateway.session_learning_cache import parent_pinned
 from hermes_cli.config import DEFAULT_CONFIG, cfg_get
 from hermes_cli.local_runtime.endpoint import LLAMACPP_ALIASES
 
@@ -835,38 +836,40 @@ class GatewayAgentCacheMixin:
         ``release_after_turn``: an agent still mid-turn is released when that turn's running slot
         clears (``_release_running_agent_state``) instead of being left to the garbage collector.
         """
-        from gateway.run import _AGENT_PENDING_SENTINEL
-        # Prompt-stability state rides the agent-cache lifecycle: a fresh agent must re-render its
-        # session-context bytes (the pin) and re-see the current voice-channel state once.
-        state = self._peek_session_state(session_key)
-        if state is not None:
-            state.conversation.ephemeral_pin = None
-            state.conversation.vc_last = None
-        # Tests build runners with ``_agent_cache_lock = None``; evict lock-free then. With the lock
-        # present ``_agent_cache`` is read directly (an initialized runner always has it).
-        _lock = getattr(self, "_agent_cache_lock", None)
-        evicted = None
-        if _lock:
-            with _lock:
-                evicted = self._agent_cache.pop(session_key, None)
-        else:
-            _cache = getattr(self, "_agent_cache", None)
-            if _cache is not None:
-                evicted = _cache.pop(session_key, None)
-        agent = _first_agent(evicted)
-        # Never tear down an agent that's mid-turn — its client, sandbox and child subagents are in use.
-        if agent is None or agent is _AGENT_PENDING_SENTINEL:
-            return
-        if id(agent) in self._running_agent_ids():
-            if release_after_turn and state is not None:
-                state.turn.retired_agents.append(agent)
-            return
-        if commit_memory:
-            target, args = self._commit_then_release_soft, (agent, session_key, True)
-        else:
-            target, args = self._release_evicted_agent_soft, (agent,)
-        self._spawn_release_thread(target, args, f"agent-evict-{str(session_key)[:24]}", inline_fallback=True,
-                                   session_key=session_key)
+        from gateway.session_learning_mutations import resident_change
+        with resident_change(self, session_key):
+            from gateway.run import _AGENT_PENDING_SENTINEL
+            # Prompt-stability state rides the agent-cache lifecycle: a fresh agent must re-render its
+            # session-context bytes (the pin) and re-see the current voice-channel state once.
+            state = self._peek_session_state(session_key)
+            if state is not None:
+                state.conversation.ephemeral_pin = None
+                state.conversation.vc_last = None
+            # Tests build runners with ``_agent_cache_lock = None``; evict lock-free then. With the lock
+            # present ``_agent_cache`` is read directly (an initialized runner always has it).
+            _lock = getattr(self, "_agent_cache_lock", None)
+            evicted = None
+            if _lock:
+                with _lock:
+                    evicted = self._agent_cache.pop(session_key, None)
+            else:
+                _cache = getattr(self, "_agent_cache", None)
+                if _cache is not None:
+                    evicted = _cache.pop(session_key, None)
+            agent = _first_agent(evicted)
+            # Never tear down an agent that's mid-turn — its client, sandbox and child subagents are in use.
+            if agent is None or agent is _AGENT_PENDING_SENTINEL:
+                return
+            if id(agent) in self._running_agent_ids():
+                if release_after_turn and state is not None:
+                    state.turn.retired_agents.append(agent)
+                return
+            if commit_memory:
+                target, args = self._commit_then_release_soft, (agent, session_key, True)
+            else:
+                target, args = self._release_evicted_agent_soft, (agent,)
+            self._spawn_release_thread(target, args, f"agent-evict-{str(session_key)[:24]}", inline_fallback=True,
+                                       session_key=session_key)
 
     def _evict_cached_agent_at_boundary(self, session_key: str) -> None:
         """Reset and compress end the conversation the provider was tracking, so the old agent's
@@ -1023,7 +1026,7 @@ class GatewayAgentCacheMixin:
         running_ids = self._running_agent_ids()
 
         def _is_live(agent: Any) -> bool:
-            return agent is not None and agent is not _AGENT_PENDING_SENTINEL and id(agent) not in running_ids
+            return agent is not None and agent is not _AGENT_PENDING_SENTINEL and id(agent) not in running_ids and not parent_pinned(self, agent)
 
         def _is_evictable(key: str, agent: Any) -> bool:
             return _is_live(agent) and transcript_persistence_caught_up(agent)
@@ -1101,7 +1104,7 @@ class GatewayAgentCacheMixin:
         # history) to protect a long-running one. Cache may stay over cap until the next insert.
         cap = self._agent_cache_cap()
         candidates = [(key, _tuple_agent(_cache.get(key))) for key in list(_cache.keys())[:max(0, len(_cache) - cap)]]
-        evict_plan = [(key, agent) for key, agent in candidates if agent is None or id(agent) not in running_ids]
+        evict_plan = [(key, agent) for key, agent in candidates if agent is None or (id(agent) not in running_ids and not parent_pinned(self, agent))]
         for key, _ in evict_plan:
             _cache.pop(key, None)
         remaining_over_cap = len(_cache) - cap
@@ -1133,7 +1136,7 @@ class GatewayAgentCacheMixin:
         with _lock:
             for key, entry in list(_cache.items()):
                 agent = _tuple_agent(entry)
-                if agent is None or id(agent) in running_ids:
+                if agent is None or id(agent) in running_ids or parent_pinned(self, agent):
                     continue  # mid-turn — don't tear it down
                 last_activity = getattr(agent, "_last_activity_ts", None)
                 if last_activity is None or (now - last_activity) <= idle_ttl:
