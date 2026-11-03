@@ -3149,6 +3149,7 @@ def _systemd_command(argv: list[str]) -> str:
 def _prepare_service_launcher(*, system: bool = False, run_as_user: str | None = None) -> None:
     """Publish the source command before a service definition references it."""
     from hermes_cli._launchers import ENTRY_POINTS, ensure_install_launchers, resolve_store_python
+    from hermes_cli.venv_sync import _is_sealed
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 
     root, home = PROJECT_ROOT, get_hermes_home()
@@ -3160,10 +3161,9 @@ def _prepare_service_launcher(*, system: bool = False, run_as_user: str | None =
         owner = (uid, username)
     token = set_hermes_home_override(home)
     try:
-        # Publication gate: ask what stage_launcher will bind, so an inherited
-        # HERMES_RUNTIME_DIR cannot stand in for this install's store (#131745).
-        if resolve_store_python(root, publication=True) is None:
-            return  # Externally owned Nix/developer runtime.
+        # Publication binds the install's store, never inherited HERMES_RUNTIME_DIR (#131745).
+        if _is_sealed(root) or resolve_store_python(root, publication=True) is None:
+            return  # Artifact-owned or external runtime; never rewrite its tree.
         local = root / ".hermes" / "bin"
         paths = ensure_install_launchers(root, local)
         if len(paths) != len(ENTRY_POINTS):

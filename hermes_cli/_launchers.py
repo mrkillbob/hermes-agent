@@ -88,12 +88,16 @@ def installation_command(repo_root: Path, args=(), *, module: str = "hermes_cli.
                          python: str | Path | None = None, home: str | Path | None = None) -> list[str]:
     """Persist a source launcher, never the versioned tool it currently uses.
 
+    Sealed bundles retain their artifact-owned interpreter and bootstrap;
+    they do not publish mutable source launchers inside the signed tree.
     External/Nix installs retain their externally owned interpreter contract.
     Source installation/update publication refreshes the local launcher when
     the managed Python pin changes.
     """
+    from hermes_cli.venv_sync import _is_sealed
+
     root = Path(repo_root)
-    if resolve_store_python(root) is None:
+    if _is_sealed(root) or resolve_store_python(root) is None:
         return runtime_command(root, args, module=module, python=python, home=home)
     prefix = [] if module == "hermes_cli.main" else ["--run-module", module]
     return [str(root / ".hermes" / "bin" / "hermes"), *prefix, *args]
