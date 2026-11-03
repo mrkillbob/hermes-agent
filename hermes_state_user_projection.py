@@ -24,14 +24,21 @@ class UserMessageProjectionMixin:
             (self._encode_content(content), _sanitize_surrogates(api_content) if api_content is not None else None, row_id, session_id,
              self._encode_content(expected_content), _sanitize_surrogates(expected_api_content) if expected_api_content is not None else None))
 
-    def set_user_message_content(self, session_id: str, row_id: int, content: Any) -> int:
+    def set_user_message_content(self, session_id: str, row_id: int, content: Any,
+                                 display_metadata: Optional[dict[str, Any]] = None) -> int:
         """Rewrite the content of ONE known active user row. Used when a user turn was written at submit
         time (before the agent ran) and the turn prologue then rewrote the prompt it persists (@-file
-        expansion, native image parts): the early row must show what the transcript will replay, not the
-        raw keystrokes, and the turn must not append a second row for the same input."""
+        expansion, native image parts, a ``pre_llm_call`` veto's placeholder): the early row must show what
+        the transcript will replay, not the raw keystrokes, and the turn must not append a second row for
+        the same input. ``display_metadata``, when given, replaces the row's (and clears ``api_content``)."""
         if not session_id or isinstance(row_id, bool) or not isinstance(row_id, int) or row_id <= 0:
             return 0
+        if display_metadata is None:
+            return self._write_rowcount(
+                "UPDATE messages SET content = ? WHERE id = ? AND session_id = ? AND role = 'user' AND active = 1",
+                (self._encode_content(content), row_id, session_id))
         return self._write_rowcount(
-            "UPDATE messages SET content = ? WHERE id = ? AND session_id = ? AND role = 'user' AND active = 1",
-            (self._encode_content(content), row_id, session_id))
+            "UPDATE messages SET content = ?, api_content = NULL, display_metadata = ? "
+            "WHERE id = ? AND session_id = ? AND role = 'user' AND active = 1",
+            (self._encode_content(content), self._encode_display_metadata(display_metadata), row_id, session_id))
 
