@@ -6,9 +6,29 @@ configuration enables it. There is no production issuer or delivery registration
 Other bridge protections and live adoption remain separately unqualified.
 """
 from dataclasses import dataclass
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from functools import wraps
 from threading import Lock
+
+_output_scope = ContextVar('diagnostic_reference_output', default=None)
+
+
+def private_output_active():
+    return _output_scope.get() is not None
+
+
+@contextmanager
+def _private_output_scope(agent, policy):
+    from agent.local_text_policy import LocalTextRestriction, local_text_scope
+    if retained_policy(agent) is not policy:
+        raise LocalTextRestriction('diagnostic_policy_mismatch')
+    token = _output_scope.set((agent, policy))
+    try:
+        with local_text_scope(True):
+            yield
+    finally:
+        _output_scope.reset(token)
 
 
 @dataclass(frozen=True)
@@ -83,6 +103,10 @@ def sealed_output_boundary(run):
     @wraps(run)
     def guarded(agent, *args, **kwargs):
         policy = retained_policy(agent)
+        ambient = _output_scope.get()
+        if ambient is not None and ambient[0] is not agent:
+            from agent.local_text_policy import LocalTextRestriction
+            raise LocalTextRestriction('diagnostic_cross_agent_unavailable')
         if policy is None:
             return run(agent, *args, **kwargs)
         gate = getattr(agent, '_diagnostic_run_gate', None)
@@ -94,7 +118,8 @@ def sealed_output_boundary(run):
         agent._diagnostic_cleanup_done = False
         try:
             try:
-                result = run(agent, *args, **kwargs)
+                with _private_output_scope(agent, policy):
+                    result = run(agent, *args, **kwargs)
             except BaseException as exc:
                 if exception_surface(policy, exc) is exc:
                     raise
@@ -107,6 +132,28 @@ def sealed_output_boundary(run):
                 agent._diagnostic_cleanup_unknown = True
             gate.release()
     return guarded
+
+
+def private_relay_unmanaged(session_id):
+    """A limiter, not permission: never bypass a required managed Relay pipeline.
+
+    Lookup only existing hosts, before resolution can restore a cold session or
+    copy any request into native interceptors/exporters. No native private-content
+    policy has been qualified; required/unknown managed execution is unavailable.
+    """
+    if not private_output_active():
+        return False
+    from agent import relay_runtime
+    from agent.local_text_policy import LocalTextRestriction
+    try:
+        turn = relay_runtime.active_turn(session_id)
+        hosts = [turn.lease.host if turn is not None else None,
+                 relay_runtime.get_runtime(create=False)]
+        if any(host is not None and host.managed_execution_enabled() is not False for host in hosts):
+            raise LocalTextRestriction('diagnostic_managed_relay_unavailable')
+    except Exception:
+        raise LocalTextRestriction('diagnostic_managed_relay_unavailable') from None
+    return True
 
 
 def exception_surface(policy, error):

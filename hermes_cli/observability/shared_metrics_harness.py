@@ -307,6 +307,9 @@ def _turn_state(agent: Any) -> _TurnState:
 
 
 def _active(agent: Any) -> bool:
+    from agent.diagnostic_reference_policy import private_output_active, retained_policy
+    if private_output_active() or retained_policy(agent) is not None:
+        return False
     return _user_agent(agent) and _enabled()
 
 
