@@ -45,7 +45,11 @@ async def recover_failed_settlement(authority, row):
         try:
             from gateway.session_runtime_workers import track_mutation
             writer = track_mutation(authority, asyncio.to_thread(_mark_unknown, authority, row))
-            return await asyncio.shield(writer)
+            status = await asyncio.shield(writer)
+            if 'curated_reference_v1' in row['payload']:
+                from gateway.session_learning_execution import retire_unknown
+                retire_unknown(authority, row)
+            return status
         except (OSError, sqlite3.Error):
             await asyncio.sleep(1)
 
@@ -188,9 +192,14 @@ def commit_and_publish(authority, live, ref, row, response, outcome, captured, s
         live.settling[admission_id] = row
     transfers = _transfers(authority, live, row)
     try:
-        settlement['settled'], settlement['response'] = finish_result(
-            authority.db, epoch=authority.epoch, row=row, response=response, outcome=outcome,
-            result=captured, prepared=prepared, transfers=transfers)
+        if 'curated_reference_v1' in row['payload']:
+            from gateway.session_learning_execution import settle_reference_sync
+            settlement['settled'] = settle_reference_sync(authority, row, captured)
+            settlement['response'] = None
+        else:
+            settlement['settled'], settlement['response'] = finish_result(
+                authority.db, epoch=authority.epoch, row=row, response=response, outcome=outcome,
+                result=captured, prepared=prepared, transfers=transfers)
         with live.event_stream.lock:
             live.settling.pop(admission_id, None)
             _publish_completion(authority, live, ref, row, settlement['settled'], settlement['response'], captured)

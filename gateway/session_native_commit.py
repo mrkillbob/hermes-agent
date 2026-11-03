@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from functools import wraps
 import os
 import re
-from threading import Lock
+from threading import Event, Lock
 import time
 
 from hermes_state_runtime import RuntimeStoreError
@@ -48,9 +48,14 @@ class NativeSendOperation:
     def __init__(self, issuer, scope, expires_at):
         self.issuer, self.scope, self.expires_at = issuer, scope, expires_at
         self.state, self.lease_released = 'prepared', False
+        self._physical_done = Event()
 
     def hold(self):
         return self.issuer.hold_send(self)
+
+    def retire_and_wait(self):
+        """Physical worker only: prevent late entry and join cleanup, never release a hold."""
+        self.issuer.retire_send(self).wait()
 
     def receipt(self):
         return self.issuer.send_receipt(self)
@@ -112,6 +117,17 @@ class NativeCommitIssuer:
     def issue_send(self, *, operation_id, payload_sha256, lifetime_s=60):
         """HOST ONLY; entry expiry is not a timer that releases a running worker."""
         return self._issue(NativeSendOperation, operation_id, payload_sha256, lifetime_s)
+
+    def retire_send(self, operation):
+        self._check_process()
+        with self._state:
+            if (type(operation) is not NativeSendOperation or operation.issuer is not self
+                    or self._operations.get(operation.scope.operation_id) is not operation):
+                _deny()
+            if operation.state == 'prepared':
+                operation.state = 'unknown'
+                operation._physical_done.set()  # no worker can enter after this state change
+            return operation._physical_done
 
     def _issue(self, kind, operation_id, payload_sha256, lifetime_s):
         self._check_process()
@@ -185,6 +201,8 @@ class NativeCommitIssuer:
             self._active = False
             waiters, self._waiters = self._waiters, []
             self._gate.release()
+            if send is not None:
+                send._physical_done.set()
         for loop, waiter in waiters:
             def finish(future=waiter):
                 if not future.done():
@@ -349,6 +367,9 @@ def native_authority_change(authority):
     with ExitStack() as stack:
         for issuer in issuers:
             stack.enter_context(issuer.registration_change(issuer.actor))
+        if getattr(authority, '_reference_intents', None):
+            from gateway.session_learning_cache import retire_native_intents
+            retire_native_intents(authority)
         yield
 
 
@@ -369,6 +390,8 @@ def retire_native_sibling(connection):
     if issuer is not None:
         with issuer.registration_change(connection.actor):
             connection._reference_intake_open = False
+            from gateway.session_learning_cache import retire_native_intents
+            retire_native_intents(connection.authority, connection)
 
 
 def fenced_native_close(close):
@@ -386,5 +409,8 @@ def fenced_native_close(close):
             pending.extend(current._siblings.values())
         for issuer in issuers:
             await issuer.quiescent()
+            if getattr(issuer.authority, '_reference_intents', None):
+                from gateway.session_learning_cache import retire_native_intents
+                retire_native_intents(issuer.authority, issuer.connection)
         return await close(connection)
     return guarded

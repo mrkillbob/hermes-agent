@@ -14,6 +14,8 @@ class _NonStreamRequest:
     def __init__(self, agent, api_kwargs: dict):
         from agent.native_send_worker import capture_native_send
         self.native_send = capture_native_send(agent)  # pin before creating the physical thread
+        from agent.reference_input_witness import capture_reference_input
+        self.reference_input = capture_reference_input(agent, self.native_send)
         self.agent = agent
         self.api_kwargs = api_kwargs
         self.result = {"response": None, "error": None}
@@ -67,6 +69,8 @@ class _NonStreamRequest:
         client = self.clients.set_client(client, kind=kind)
         from agent.native_send_worker import validate_send_client
         validate_send_client(self.native_send, client, self.api_kwargs)
+        from agent.reference_input_witness import install_private_client
+        install_private_client(self.reference_input, client)
         return client
 
     def _call(self):
@@ -74,7 +78,8 @@ class _NonStreamRequest:
             return self._call_body()
         from agent.local_text_policy import LocalTextRestriction
         try:
-            with self.native_send.hold():
+            from agent.reference_input_witness import reference_worker_scope
+            with self.native_send.hold(), reference_worker_scope(self.reference_input):
                 self._call_body()  # includes request-client cleanup before hold release
                 if self.result['error'] is not None:
                     raise self.result['error']
@@ -96,6 +101,8 @@ class _NonStreamRequest:
                 watchdog_context_token = watchdog_state_var.set(self.codex_watchdog_state)
             self.result["response"] = h._dispatch_nonstreaming_api_request(
                 self.agent, self.api_kwargs, make_client=self._make_client)
+            from agent.reference_input_witness import observe_private_response
+            observe_private_response(self.reference_input, self.result['response'])
         except Exception as e:  # health: allow BLE001 -- Store SDK errors for caller-thread propagation after cleanup, preserving cancellation and retirement handling.
             # Our own force-close caused this error: swallow it, the main
             # thread raises InterruptedError (#6600). Retirement logs at info
@@ -120,7 +127,8 @@ class _NonStreamRequest:
             # Reuse reason only on a clean response; error or cancel-swallow
             # really closes so the next attempt builds a fresh pool.
             self.clients.close_once(
-                "request_complete" if self.result["response"] is not None else "request_error_cleanup")
+                "private_reference_cleanup" if self.reference_input is not None else
+                ("request_complete" if self.result["response"] is not None else "request_error_cleanup"))
 
     def _abort_request(self, reason: str) -> None:
         """Watchdog/interrupt kill: abort the request client (kind-aware, #67142)
