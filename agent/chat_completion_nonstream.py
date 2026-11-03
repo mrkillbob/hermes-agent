@@ -80,7 +80,7 @@ class _NonStreamRequest:
                     raise self.result['error']
                 if self.result['response'] is None:
                     raise LocalTextRestriction('native_send_outcome_unknown')
-        except BaseException as error:
+        except BaseException as error:  # health: allow BLE001 -- Hand worker failures and control exceptions to the poller; private failures stay terminal.
             self.result['response'] = None
             self.result['error'] = (error if not isinstance(error, Exception) or isinstance(error, InterruptedError)
                                     else LocalTextRestriction('native_send_failed'))
@@ -96,7 +96,7 @@ class _NonStreamRequest:
                 watchdog_context_token = watchdog_state_var.set(self.codex_watchdog_state)
             self.result["response"] = h._dispatch_nonstreaming_api_request(
                 self.agent, self.api_kwargs, make_client=self._make_client)
-        except Exception as e:
+        except Exception as e:  # health: allow BLE001 -- Store SDK errors for caller-thread propagation after cleanup, preserving cancellation and retirement handling.
             # Our own force-close caused this error: swallow it, the main
             # thread raises InterruptedError (#6600). Retirement logs at info
             # (a watchdog discarded output the provider already sent — what an

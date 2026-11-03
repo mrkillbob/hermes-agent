@@ -161,7 +161,7 @@ def private_relay_unmanaged(session_id):
                  relay_runtime.get_runtime(create=False)]
         if any(host is not None and host.managed_execution_enabled() is not False for host in hosts):
             raise LocalTextRestriction('diagnostic_managed_relay_unavailable')
-    except Exception:
+    except Exception:  # health: allow BLE001 -- Keep native policy-inspection failures private and terminal; never fall back unmanaged.
         raise LocalTextRestriction('diagnostic_managed_relay_unavailable') from None
     return True
 
