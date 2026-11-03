@@ -18,6 +18,11 @@ def private_output_active():
     return _output_scope.get() is not None
 
 
+def private_output_owner(agent):
+    value = _output_scope.get()
+    return value is not None and value[0] is agent and value[1] is retained_policy(agent)
+
+
 @contextmanager
 def _private_output_scope(agent, policy):
     from agent.local_text_policy import LocalTextRestriction, local_text_scope
@@ -108,6 +113,9 @@ def sealed_output_boundary(run):
             from agent.local_text_policy import LocalTextRestriction
             raise LocalTextRestriction('diagnostic_cross_agent_unavailable')
         if policy is None:
+            if getattr(agent, '__dict__', {}).get('_native_send_operation') is not None:
+                from agent.local_text_policy import LocalTextRestriction
+                raise LocalTextRestriction('native_send_worker_unavailable')
             return run(agent, *args, **kwargs)
         gate = getattr(agent, '_diagnostic_run_gate', None)
         if (getattr(agent, '_diagnostic_cleanup_unknown', False)
@@ -119,6 +127,8 @@ def sealed_output_boundary(run):
         try:
             try:
                 with _private_output_scope(agent, policy):
+                    from agent.native_send_worker import capture_native_send
+                    capture_native_send(agent)  # refuse unsupported paths before turn setup/auxiliary work
                     result = run(agent, *args, **kwargs)
             except BaseException as exc:
                 if exception_surface(policy, exc) is exc:
