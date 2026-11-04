@@ -47,11 +47,9 @@ permissions:
   contents: read
   pull-requests: read
 
-# Cancel stale PR work when a new commit arrives. Pushes, dispatches, and
-# release calls keep their current run and are never cancelled by this rule.
-concurrency:
-  group: ci-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
-  cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
+# Supersede stale PR workloads per job, not per workflow. Required finalizers
+# keep always() and remain outside the groups: a queued old aggregate cannot
+# retain the slot needed to start a newer head. Caller/callee prefixes differ.
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────
@@ -65,6 +63,9 @@ jobs:
   # tag is not a meaningful applicability signal.
   # ─────────────────────────────────────────────────────────────────────
   detect:
+    concurrency:
+      group: ci-workload-detect-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Detect affected areas
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -175,6 +176,9 @@ jobs:
   # retain their classified PR/push lanes and full native journeys.
   # ─────────────────────────────────────────────────────────────────────
   tests:
+    concurrency:
+      group: ci-workload-tests-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Python tests
     needs: detect
     # Its E2E jobs are lanes of their own: a lane the classifier sets must reach
@@ -182,10 +186,11 @@ jobs:
     if: needs.detect.outputs.python == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true'
     uses: ./.github/workflows/tests.yml
     with:
-      # NousResearch runs the full unit suite on one 32-core runner. Forks
-      # have standard 4-core runners, so use more, smaller slices there.
+      # Keep the complete file inventory with fewer repeated hosted checkouts
+      # and locked setups. Twelve fork slices retain four workers each and
+      # the existing 60-minute ceiling; upstream keeps one 32-core slice.
       commit: ${{ inputs.commit }}
-      slice_count: ${{ github.repository == 'NousResearch/hermes-agent' && 1 || 24 }}
+      slice_count: ${{ github.repository == 'NousResearch/hermes-agent' && 1 || 12 }}
       # The fork runs the complete suite on parallel GitHub-hosted shards; E2E
       # lanes still follow the diff classifier.
       e2e_mode: full
@@ -201,6 +206,9 @@ jobs:
   # `python` alone those never reached the Windows hand-off tests below.
   # This fork's Windows-native advisory callers retain visible results.
   tests-os:
+    concurrency:
+      group: ci-workload-tests-os-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: OS-specific tests
     needs: detect
     if: needs.detect.outputs.python == 'true' || needs.detect.outputs.desktop_updater == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true'
@@ -217,6 +225,9 @@ jobs:
       strict_acceptance: ${{ inputs.strict_acceptance || '' }}
 
   tests-windows-advisory:
+    concurrency:
+      group: ci-workload-tests-windows-advisory-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Windows-only tests (advisory)
     needs: detect
     if: (needs.detect.outputs.python == 'true' || needs.detect.outputs.desktop_updater == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true') && needs.detect.outputs.advisory_windows == 'true'
@@ -230,6 +241,9 @@ jobs:
       strict_acceptance: ${{ inputs.strict_acceptance || '' }}
 
   lint:
+    concurrency:
+      group: ci-workload-lint-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Python lints
     needs: detect
     # frontend too: the code-health ratchet in lint.yml also covers TypeScript.
@@ -241,6 +255,9 @@ jobs:
       python: ${{ needs.detect.outputs.python == 'true' }}
 
   js-tests:
+    concurrency:
+      group: ci-workload-js-tests-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: JS & TS checks
     needs: detect
     if: needs.detect.outputs.frontend == 'true'
@@ -249,6 +266,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   rust-tests:
+    concurrency:
+      group: ci-workload-rust-tests-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Rust tests
     needs: detect
     # Only for PRs that touch a Rust crate. `.rs` is under apps/, so these
@@ -259,6 +279,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   catalog-tests:
+    concurrency:
+      group: ci-workload-catalog-tests-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Catalog tests
     needs: detect
     # A PR that changes only catalog entry data runs these instead of the
@@ -270,6 +293,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   remote-backends:
+    concurrency:
+      group: ci-workload-remote-backends-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Remote terminal backends
     needs: detect
     # The SSH and Docker terminal backends against a real sshd container and the
@@ -282,6 +308,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   bootstrap-installer:
+    concurrency:
+      group: ci-workload-bootstrap-installer-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Bootstrap installer
     needs: detect
     # The bootstrap-installer path: install.sh, the pin fragments it embeds,
@@ -294,6 +323,9 @@ jobs:
       platform_scope: ${{ needs.detect.outputs.bootstrap_tests_scope }}
 
   bootstrap-windows-advisory:
+    concurrency:
+      group: ci-workload-bootstrap-windows-advisory-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Windows-only bootstrap installer (advisory)
     needs: detect
     if: needs.detect.outputs.bootstrap == 'true' && needs.detect.outputs.advisory_windows == 'true'
@@ -303,6 +335,9 @@ jobs:
       platform_scope: windows
 
   e2e-desktop:
+    concurrency:
+      group: ci-workload-e2e-desktop-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Desktop E2E
     needs: detect
     # python_prod (not python): the Playwright suite exercises the built app
@@ -323,6 +358,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   e2e-desktop-core:
+    concurrency:
+      group: ci-workload-e2e-desktop-core-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Desktop core E2E
     needs: detect
     # The deterministic core suite (apps/desktop/e2e/core): transcript
@@ -334,6 +372,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   e2e-desktop-update:
+    concurrency:
+      group: ci-workload-e2e-desktop-update-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Desktop update E2E
     needs: detect
     # apps/desktop/e2e/update: a real install.sh install + packaged Desktop,
@@ -349,6 +390,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   docs-site:
+    concurrency:
+      group: ci-workload-docs-site-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Docs Site
     needs: detect
     if: needs.detect.outputs.site == 'true'
@@ -357,6 +401,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   history-check:
+    concurrency:
+      group: ci-workload-history-check-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Deny unrelated histories
     needs: detect
     if: needs.detect.outputs.event_name == 'pull_request'
@@ -365,6 +412,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   contributor-check:
+    concurrency:
+      group: ci-workload-contributor-check-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Check contributors
     needs: detect
     if: needs.detect.outputs.python == 'true' || needs.detect.outputs.catalog == 'true'
@@ -373,6 +423,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   uv-lockfile:
+    concurrency:
+      group: ci-workload-uv-lockfile-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Check uv.lock
     needs: detect
     # Gated: `uv lock --check` re-resolves the whole dependency graph against
@@ -386,6 +439,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   infographic-check:
+    concurrency:
+      group: ci-workload-infographic-check-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Check no committed infographics
     needs: detect
     uses: ./.github/workflows/infographic-check.yml
@@ -393,6 +449,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   profile-artifact-check:
+    concurrency:
+      group: ci-workload-profile-artifact-check-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Profile artifact check
     needs: detect
     uses: ./.github/workflows/profile-artifact-check.yml
@@ -400,6 +459,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   icons-freshness-check:
+    concurrency:
+      group: ci-workload-icons-freshness-check-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Icon assets freshness
     needs: detect
     uses: ./.github/workflows/icons-freshness-check.yml
@@ -407,6 +469,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   case-collision-check:
+    concurrency:
+      group: ci-workload-case-collision-check-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Check no case-colliding filenames
     needs: detect
     uses: ./.github/workflows/case-collision-check.yml
@@ -414,6 +479,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   blob-size-check:
+    concurrency:
+      group: ci-workload-blob-size-check-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Check no large binaries
     needs: detect
     uses: ./.github/workflows/blob-size-check.yml
@@ -421,6 +489,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   lazy-deps-guard:
+    concurrency:
+      group: ci-workload-lazy-deps-guard-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: No production imports of the tools.lazy_deps stub
     needs: detect
     uses: ./.github/workflows/lazy-deps-guard.yml
@@ -428,6 +499,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   lockfile-diff:
+    concurrency:
+      group: ci-workload-lockfile-diff-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: package-lock.json diff
     needs: detect
     if: needs.detect.outputs.event_name == 'pull_request' && needs.detect.outputs.npm_lock == 'true'
@@ -438,6 +512,9 @@ jobs:
   # Advisory summary of the committed prompt-surface snapshot's diff. A stdlib-only job over two
   # committed directories: cheap enough to run on every Python PR, and silent when nothing moved.
   prompt-surface-diff:
+    concurrency:
+      group: ci-workload-prompt-surface-diff-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Prompt surface diff
     needs: detect
     if: needs.detect.outputs.event_name == 'pull_request' && needs.detect.outputs.python == 'true'
@@ -446,6 +523,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   docker-lint:
+    concurrency:
+      group: ci-workload-docker-lint-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Lint Docker scripts
     needs: detect
     if: needs.detect.outputs.docker_meta == 'true'
@@ -454,6 +534,9 @@ jobs:
       commit: ${{ inputs.commit }}
 
   supply-chain:
+    concurrency:
+      group: ci-workload-supply-chain-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: Supply-chain scan
     needs: detect
     if: needs.detect.outputs.event_name == 'pull_request' && (needs.detect.outputs.scan == 'true' || needs.detect.outputs.deps == 'true' || needs.detect.outputs.npm_lock == 'true')
@@ -484,6 +567,9 @@ jobs:
       supply_chain: ${{ needs.supply-chain.outputs.critical_findings == 'true' }}
 
   osv-scanner:
+    concurrency:
+      group: ci-workload-osv-scanner-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
+      cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
     name: OSV scan
     permissions:
       actions: read
@@ -572,6 +658,9 @@ jobs:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit || github.sha }}
+          # The required verdict consumes needs JSON and this stdlib script.
+          sparse-checkout: /scripts/ci/required_results.py
+          sparse-checkout-cone-mode: false
       - name: Evaluate job results
         id: evaluate
         # Shared with the stable orchestrator (scripts/ci/required_results.py
