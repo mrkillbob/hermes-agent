@@ -54,8 +54,16 @@ jobs:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
-          # The seeded install clones this checkout through a local bare origin.
-          fetch-depth: 0
+          # Fetch the tested commit first; unrelated refs can contain large assets.
+          fetch-depth: 1
+
+      - name: Fetch complete tested-commit ancestry
+        run: |
+          # The real installer needs full ancestry, not every branch and release tag.
+          # Keep the checked-out commit fixed, including a PR's synthetic merge.
+          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+            git -c protocol.version=2 fetch --no-tags --no-recurse-submodules --unshallow origin "$(git rev-parse HEAD)"
+          fi
 
       - name: Install system dependencies for Electron and the sandbox
         run: |
