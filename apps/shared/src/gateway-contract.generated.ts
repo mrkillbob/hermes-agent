@@ -858,6 +858,7 @@ export interface ModelOptionProvider {
 export interface ModelCapabilities {
   fast: boolean
   ultrafast?: boolean
+  daybreak?: boolean
   reasoning: boolean
   can_disable_reasoning?: boolean | null
 }
@@ -1910,19 +1911,20 @@ export interface BotRelayReplyParams {
 export interface I18nLanguagesResult {
   languages: LanguageOption[]
 }
-/** ``agent.i18n_languages.language_options`` row. ``source`` is ``bundled``, ``overlay`` or ``plugin:<name>`` — the highest layer that supplies the language. */
+/** ``agent.i18n_languages.language_options`` row. ``source`` is ``bundled``, ``overlay`` or ``plugin:<name>`` — the highest layer that supplies the language. ``surfaces`` are the surfaces some layer has strings for; a renderer leaves out a language it does not bundle and that lacks its surface, since picking it would only show English. */
 export interface LanguageOption {
   id: string
   endonym: string
   rtl: boolean
   source: string
+  surfaces: LocaleSurface[]
 }
+export type LocaleSurface = 'core' | 'tui' | 'desktop'
 export interface I18nCatalogParams {
   profile?: string | null
   lang: string
   surface?: LocaleSurface
 }
-export type LocaleSurface = 'core' | 'tui' | 'desktop'
 /** ``messages`` is ONLY the pack + user-overlay layer for that surface (flat dotted keys); the client merges it over its bundled ``en``/``<lang>``. ``lang`` is the canonical id the request resolved to (``pt-BR`` → ``pt-br``; an unknown id resolves to ``en`` with an empty layer). */
 export interface I18nCatalogResult {
   lang: string
@@ -2404,6 +2406,14 @@ export interface FailedDelegation {
   error?: string | null
   dispatched_at?: number | null
   completed_at?: number | null
+}
+export interface SubagentRosterResult {
+  sessions?: SubagentRosterEntry[]
+}
+export interface SubagentRosterEntry {
+  session_id: string
+  subagents?: number
+  background?: number
 }
 export interface SubagentInterruptParams {
   session_id: string
@@ -4441,7 +4451,7 @@ export interface PluginToolsetRow {
   label: string
   description: string
 }
-/** ``toggle``: ``key``/``name`` + ``enable``; ``install``: ``identifier``/``repo`` or ``catalog_name`` (+ ``force``, ``enable``, ``ref``, ``inspected_sha`` = the commit ``inspect`` read: a custom source with no ``ref`` whose branch moved since is refused); ``inspect``: ``identifier``/``repo`` or ``catalog_name``; ``install_desktop``: ``identifier``/``repo`` (https only) or ``catalog_name`` + ``ref`` (the commit ``inspect`` read and the dialog showed; another commit is refused) (+ ``force``) — the desktop half onto the host that serves this client; ``remove_desktop``: ``name`` (+ ``force`` for a package's own half); ``update``: ``name`` (+ ``accept_capabilities`` to apply a re-pin that widened the plugin after the user confirmed the ``delta``, + ``force`` to apply an update whose security scan returned caution after the user saw the findings); ``remove``: ``name`` (user installs only); ``settings``: ``key`` + ``values`` (``{setting_key: value}``, non-secret schema keys only); ``presence``: ``names`` (catalog names, answered in that order). */
+/** ``toggle``: ``key``/``name`` + ``enable``; ``install``: ``identifier``/``repo`` or ``catalog_name`` (+ ``force``, ``enable``, ``ref``, ``inspected_sha`` = the commit ``inspect`` read: a custom source with no ``ref`` whose branch moved since is refused); ``inspect``: ``identifier``/``repo`` or ``catalog_name``; ``install_desktop``: ``identifier``/``repo`` (any source ``install`` takes) or ``catalog_name``, always with ``ref`` (the commit ``inspect`` read and the dialog showed; another commit is refused) (+ ``force``) — the desktop half onto the host that serves this client; ``remove_desktop``: ``name`` (+ ``force`` for a package's own half); ``update``: ``name`` (+ ``accept_capabilities`` to apply a re-pin that widened the plugin after the user confirmed the ``delta``, + ``force`` to apply an update whose security scan returned caution after the user saw the findings); ``remove``: ``name`` (user installs only); ``settings``: ``key`` + ``values`` (``{setting_key: value}``, non-secret schema keys only); ``presence``: ``names`` (catalog names, answered in that order). */
 export interface PluginsManageParams {
   profile?: string | null
   action?: PluginsAction
@@ -4768,6 +4778,7 @@ export interface CanonicalSessionInfo {
   tool_availability?: Record<string, unknown> | null
   tool_availability_warnings?: string[] | null
   unknown_toolsets?: string[] | null
+  usage?: Usage | null
   source: string
   model?: string | null
   lazy: boolean
@@ -5127,6 +5138,7 @@ export interface CanonicalSnapshotInfo {
   tool_availability?: Record<string, unknown> | null
   tool_availability_warnings?: string[] | null
   unknown_toolsets?: string[] | null
+  usage?: Usage | null
   desktop_protocol: 'hermes-gateway-v1'
   source?: string | null
   model?: string | null
@@ -6577,6 +6589,8 @@ export interface RpcMethods {
   'subagent.interrupt': { params: SubagentInterruptParams; result: SubagentInterruptResult }
   /** Live children owned by this session (other sessions' children never leak). */
   'subagent.list': { params: SessionParams; result: SubagentListResult }
+  /** Per-conversation counts of live delegated children and running background processes, limited to conversations stored in the named profile (launch profile when omitted). Needs no attached session. */
+  'subagent.roster': { params: ProfileParams; result: SubagentRosterResult }
   /** Return the authority receipt for one owned child; ``found`` is false when not owned by this session. */
   'subagent.status': { params: SubagentStatusParams; result: SubagentStatusResult }
   /** Queue steering text into a live delegated child owned by this session. */
@@ -6882,6 +6896,7 @@ export const RPC_METHODS = [
   'spawn_tree.save',
   'subagent.interrupt',
   'subagent.list',
+  'subagent.roster',
   'subagent.status',
   'subagent.steer',
   'subagent.tail',

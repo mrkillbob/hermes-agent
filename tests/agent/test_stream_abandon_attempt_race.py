@@ -27,10 +27,10 @@ def test_retry_started_before_terminal_abandonment_keeps_its_request(monkeypatch
     entered, proceed = Event(), Event()
     abandon = call._abandon_wedged_worker
 
-    def pause_terminal_abandonment(elapsed, attempt):
+    def pause_terminal_abandonment(elapsed, attempt, kind="stale"):
         entered.set()
         assert proceed.wait(10)
-        abandon(elapsed, attempt)
+        abandon(elapsed, attempt, kind)
 
     monkeypatch.setattr(call, "_abandon_wedged_worker", pause_terminal_abandonment)
     monitor = Thread(target=lambda: call._rearm_or_abandon_after_kill(1, expected_attempt_id=1))

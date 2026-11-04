@@ -210,3 +210,36 @@ def test_tied_memory_skill_scores_have_string_targets_and_serializable_graph(tmp
     assert [edge["target"] for edge in memory_edges] == list(names)
     assert all(isinstance(edge["target"], str) for edge in memory_edges)
     assert json.loads(json.dumps(graph))["edges"] == graph["edges"]
+
+
+def test_build_skill_nodes_skips_profile_install_swap_leftover(tmp_path):
+    """A locked old tree a force install left in ``.hermes-dist`` is not a second copy."""
+    from agent.skill_utils import DIST_SWAP_DIR
+
+    skills = tmp_path / "skills"
+    for skill_dir, body in ((skills / "demo", "new"), (skills / DIST_SWAP_DIR / "demo.old-1", "old")):
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(f"---\nname: demo-{body}\n---\n", encoding="utf-8")
+
+    assert set(learning_graph.build_skill_nodes([("profile", skills)])) == {"demo-new"}
+
+
+def test_foreground_created_skill_is_in_journey_before_first_use(tmp_path):
+    """A skill created in the foreground (/learn, skill_manage) shows in the journey with zero
+    uses, while an unmarked never-used local skill (hand-written) stays out."""
+    from tools import skill_usage
+
+    home = tmp_path / ".hermes"
+    for name in ("fresh-learn-skill", "hand-written"):
+        (home / "skills" / "demo" / name).mkdir(parents=True)
+        (home / "skills" / "demo" / name / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: d.\n---\n\n# {name}\n", encoding="utf-8")
+    token = set_hermes_home_override(home)
+    try:
+        skill_usage.record_created("fresh-learn-skill", agent_created=False)
+        skill_nodes = {n["id"] for n in learning_graph.build_learning_graph()["nodes"] if n["kind"] == "skill"}
+    finally:
+        reset_hermes_home_override(token)
+
+    assert "fresh-learn-skill" in skill_nodes
+    assert "hand-written" not in skill_nodes

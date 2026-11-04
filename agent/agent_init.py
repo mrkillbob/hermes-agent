@@ -1012,27 +1012,6 @@ def _client_kwargs_from_routed(client, timeout) -> dict[str, Any]:
     return kwargs
 
 
-def _requires_direct_kanban_tools(agent) -> bool:
-    """Protected workers use tool results with supported provenance bindings.
-
-    Programmatic execute_code aggregates lose their individual producer proofs.
-    Keep them out of the worker scope, including protected fallback routes;
-    ordinary interactive and exclusively local sessions retain their scope.
-    """
-    if os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1":
-        return True
-    if not str(os.environ.get("HERMES_KANBAN_TASK") or "").strip():
-        return False
-    from agent.llm_egress_runtime import provider_uses_egress_firewall
-
-    providers = [getattr(agent, "provider", None)]
-    providers.extend(
-        entry.get("provider") for entry in (getattr(agent, "_fallback_chain", None) or [])
-        if isinstance(entry, dict)
-    )
-    return any(provider_uses_egress_firewall(provider) for provider in providers)
-
-
 def _load_tools(agent, enabled_toolsets, disabled_toolsets):
     from agent.local_text_policy import local_text_only
     if local_text_only():
@@ -1042,7 +1021,8 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
         agent._tool_snapshot_generation, agent._delegation_backend = -1, None
         agent._kanban_worker_guidance = ''
         return
-    direct_worker_tools = _requires_direct_kanban_tools(agent)
+    from agent.remote_task_context import requires_direct_kanban_tools
+    direct_worker_tools = requires_direct_kanban_tools(agent)
     if direct_worker_tools:
         disabled_toolsets = list(disabled_toolsets or [])
         if "code_execution" not in disabled_toolsets:
@@ -1069,10 +1049,11 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
     agent._tool_snapshot_generation, agent._delegation_backend = _snapshot_registry._generation, saved_backend()
     import model_tools
     from agent.oneshot_footprint import agent_is_oneshot
-    from toolsets import agent_tool_surface, session_disabled_toolsets
+    from toolsets import agent_tool_surface, session_disabled_toolsets, tool_selection_key
     agent._configured_disabled_toolsets, disabled_toolsets = disabled_toolsets, session_disabled_toolsets(
         disabled_toolsets, getattr(agent, "platform", None), oneshot=agent_is_oneshot(agent))  # pin restore reads both
     agent.disabled_toolsets = disabled_toolsets  # so the tool_search bridge and delegate children drop them too
+    agent._tool_snapshot_selection = tool_selection_key(enabled_toolsets, disabled_toolsets)  # tools[] freeze gate
     agent.tools = agent_tool_surface(agent, model_tools.get_tool_definitions(
         enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets, quiet_mode=agent.quiet_mode) or [])
     if direct_worker_tools:

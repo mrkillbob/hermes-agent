@@ -158,6 +158,20 @@ def session_members(sid: int) -> list[int]:
     return out
 
 
+def _argv(pid: int) -> list[str]:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")[:-1]
+    except OSError:
+        return []
+
+
+def _pgid_of(pid: int) -> int | None:
+    try:
+        return os.getpgid(pid)
+    except OSError:
+        return None
+
+
 def cmdline(pid: int) -> str:
     try:
         return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
@@ -358,7 +372,9 @@ class PtyHermes:
 
         The profile's ``gateway run`` is not a leftover: ``hermes chat`` attaches to it and it
         keeps serving (cron, messaging, the next client) after the client exits; ``close()`` still
-        tears it down with the rest of this harness's tree."""
+        tears it down with the rest of this harness's tree. Neither is that gateway's owner-death
+        supervisor while the gateway lives: it belongs to the gateway, and after the gateway's last
+        owned command it stays for an idle grace on purpose (``_SUPERVISOR_IDLE_EXIT_S``)."""
         from gateway.status import looks_like_gateway_command_line
 
         def tracked_live() -> set[int]:

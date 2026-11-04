@@ -246,7 +246,7 @@ _LONG_HANDLERS = frozenset({
     "wake.status", "session.active_list", "session.branch", "session.compress", "session.list",
     "session.resume", "session.save", "session.workspace.move", "shell.exec", "skills.manage", "slash.exec",
     "prompt.submit",
-    "onboarding.start", "onboarding.state",
+    "onboarding.start", "onboarding.state", "subagent.roster",
     "command.dispatch",  # /goal draft invokes the auxiliary model; never block the RPC reader
     "shared_metrics.set",  # consent reconcile waits on the metrics store's write lock
 })
@@ -1022,9 +1022,8 @@ def _approval_request_payload(data: dict | None) -> dict:
             if payload.get("allow_permanent") is not False:
                 choices.append("always")
         payload["choices"] = choices + ["deny"]
-    if "command" in payload:
-        from gateway.run import _redact_approval_command
-        payload["command"] = _redact_approval_command(payload.get("command"))
+    from gateway.run import _redact_approval_command  # description too: consent prompts carry MCP/vault text
+    payload.update({k: _redact_approval_command(payload[k]) for k in ("command", "description") if k in payload})
     return payload
 
 
