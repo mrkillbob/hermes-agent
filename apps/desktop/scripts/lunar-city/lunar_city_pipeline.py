@@ -50,7 +50,7 @@ def run_stage(stage):
 
     # Execute the script
     exec_globals = {"__name__": "__main__", "__file__": str(script_path)}
-    with open(script_path) as f:
+    with open(script_path, encoding='utf-8-sig') as f:
         code = f.read()
 
     try:

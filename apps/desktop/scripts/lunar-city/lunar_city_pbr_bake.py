@@ -272,7 +272,7 @@ def run_pipeline():
         print(f"ERROR: Manifest not found at {MANIFEST_PATH}")
         sys.exit(1)
 
-    with open(MANIFEST_PATH) as f:
+    with open(MANIFEST_PATH, encoding='utf-8-sig') as f:
         manifest = json.load(f)
 
     assets = manifest.get("requiredAssets", [])
@@ -375,13 +375,13 @@ def run_pipeline():
             if asset.get("status") == "retopology_lods_complete":
                 asset["status"] = "pbr_baked"
 
-    with open(MANIFEST_PATH, 'w') as f:
+    with open(MANIFEST_PATH, 'w', encoding='utf-8') as f:
         json.dump(manifest, f, indent=2)
     print(f"Manifest updated: {MANIFEST_PATH}")
 
     # Write bake summary
     summary_path = TEXTURE_OUTPUT / "bake-summary.json"
-    with open(summary_path, 'w') as f:
+    with open(summary_path, 'w', encoding='utf-8') as f:
         json.dump({
             "generated": str(Path.cwd()),
             "assetCount": len(bake_results),

@@ -300,7 +300,7 @@ def main():
             bpy.context.scene.collection.objects.link(obj)
 
     # Load manifest
-    with open(SOURCES.parent / "master-asset-manifest.json") as f:
+    with open(SOURCES.parent / "master-asset-manifest.json", encoding='utf-8-sig') as f:
         manifest = json.load(f)
 
     buildings = [
@@ -342,7 +342,7 @@ def main():
         },
     }
 
-    with open(MANIFEST_PATH, "w") as f:
+    with open(MANIFEST_PATH, "w", encoding='utf-8') as f:
         json.dump(shell_manifest, f, indent=2)
 
     print(f"Shell fitting complete: {shell_manifest['summary']}")
