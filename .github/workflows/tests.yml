@@ -557,9 +557,11 @@ jobs:
           SHARD: ${{ matrix.shard }}
           HERMES_E2E_STRICT_ACCEPTANCE: ${{ inputs.strict_acceptance }}
           # Each file drives real installs/updaters (process trees plus uv and
-          # git I/O); cpu_count of them at once starves their deadlines. A
-          # shard holds at most ~7 files, so this runs each shard in one wave.
-          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '6' || '3' }}
+          # git I/O); cpu_count of them at once starves their deadlines.
+          # Network modules retain a full fresh install until their file exits:
+          # three concurrent seeds exhausted a standard runner before cases ran.
+          # One network worker lets per-file scratch cleanup precede the next seed.
+          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '6' || matrix.shard == 'network' && '1' || '3' }}
           HERMES_TEST_FILE_TIMEOUT: "3000"
           # Each file contains deterministic, destructive-in-a-sandbox update scenarios; retrying
           # the whole file after a failure repeats several full installs without adding evidence.
