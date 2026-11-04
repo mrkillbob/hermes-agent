@@ -235,9 +235,9 @@ def test_all_applicable_ci_jobs_are_aggregated_and_desktop_e2e_stays_deferred(tm
     assert checks - required == set(advisory)
     policy = next(step for step in jobs["detect"]["steps"] if step.get("id") == "platform-policy")
     for index, (repository, release, ref_type, optional) in enumerate([
-        ("mrkillbob/hermes-agent", "false", "branch", True),
-        ("mrkillbob/hermes-agent", "true", "branch", False),
-        ("mrkillbob/hermes-agent", "false", "tag", False),
+        ("Coding-Sensations/hermes-agent", "false", "branch", True),
+        ("Coding-Sensations/hermes-agent", "true", "branch", False),
+        ("Coding-Sensations/hermes-agent", "false", "tag", False),
         ("NousResearch/hermes-agent", "false", "branch", False),
         ("another/hermes-agent", "false", "branch", False),
     ]):
