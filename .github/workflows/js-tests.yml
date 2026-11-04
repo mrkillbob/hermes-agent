@@ -118,7 +118,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, macos-latest, windows-2025]
+        # GitHub's Free plan runs 5 macOS jobs at once across every workflow, so a
+        # macOS leg on each PR push queues behind other runs for over an hour. PRs
+        # keep Linux and Windows; macOS runs on pushes to main, dispatch and release.
+        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest","windows-2025"]' || '["ubuntu-latest","macos-latest","windows-2025"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
