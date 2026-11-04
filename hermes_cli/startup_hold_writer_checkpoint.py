@@ -84,7 +84,7 @@ class WriterSnapshot:
 
 
 @contextmanager
-def capture_writers():
+def capture_writers(snapshot_class=None):
     """Admission is held by caller. Keep every original descriptor locked through publication."""
     from hermes_cli.startup_hold_reconcile import _version
     from pm.lifetime_handles import open_hold
@@ -96,7 +96,7 @@ def capture_writers():
         try:
             info = directory.lstat()
         except FileNotFoundError:
-            yield WriterSnapshot(directory, None, files)
+            yield (snapshot_class or WriterSnapshot)(directory, None, files)
             return
         _secure(info, directory=True)
         for path in sorted(directory.iterdir()):
@@ -113,7 +113,7 @@ def capture_writers():
                 _refuse('short_read')
             _record(raw)
             files[path.name] = (fd, _version(named), raw)
-        snapshot = WriterSnapshot(directory, _version(info), files)
+        snapshot = (snapshot_class or WriterSnapshot)(directory, _version(info), files)
         yield snapshot
         snapshot.check()
     finally:

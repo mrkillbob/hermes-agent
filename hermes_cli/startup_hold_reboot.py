@@ -77,8 +77,8 @@ def _walk_error(_error):
     _refuse()
 
 
-def _source_binding():
-    root = Path(__file__).resolve().parents[1]
+def _source_binding(root=None):
+    root = Path(__file__).resolve().parents[1] if root is None else root
     hashes = {}
     excluded = {'tests', 'node_modules', 'venv', '__pycache__', 'site-packages', 'build', 'dist'}
     for directory, names, files in os.walk(root, onerror=_walk_error):

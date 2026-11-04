@@ -39,3 +39,21 @@ After the verified later boot, `hermes gateway drain hold` consumes this proof t
 native startup transaction; its matching `restore --hold-id ...` uses the same guarded path.
 The separate read-only `hermes gateway drain reconcile` assessment still uses ordinary writer
 exclusion and can refuse these unsettled references. Assessment is not the proof consumer.
+
+## Consuming a checkpoint whose writer files had their ctime changed
+
+The strict proof binds every retained writer reference by its full file version, which includes
+ctime. ctime is maintained by the operating system and moves on any metadata touch, so a valid
+checkpoint can stop validating after its reboot even though no writer reference changed.
+
+`gateway drain hold` and `gateway drain restore --hold-id` accept
+`--attest-checkpoint-sha256 <sha256 of .startup-legacy-reboot.json>`. With the exact hash of the
+committed schema-3 checkpoint, the writer references are bound by inode, size, mtime, link count and
+content hash instead of ctime, and the recovery source named in the checkpoint must still exist at its
+recorded path with its recorded hash. Everything else is unchanged: the same host and native volume,
+the root identity, the complete ledger version, a later native boot, refusal of live writers, closure
+of every selected row, and the ESTOP requirement. Added, removed, replaced or edited references still
+refuse. The attested path never writes, deletes or settles a record, and hold and restore still do not
+retire the retained custody records. A wrong, malformed or stale hash refuses before anything is
+published.
+
