@@ -34,22 +34,88 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), OpenR
 
 ## About this fork
 
-This repository is an **unofficial fork** of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent), maintained at [Coding-Sensations/hermes-agent](https://github.com/Coding-Sensations/hermes-agent). Hermes Agent is the work of Nous Research and its contributors; this fork keeps the MIT license and tracks upstream through periodic sync pull requests. It is not an official Nous Research release, so use upstream for the stock experience and the documentation links above.
+This repository is an **unofficial fork** of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent), maintained at [Coding-Sensations/hermes-agent](https://github.com/Coding-Sensations/hermes-agent). Hermes Agent is the work of Nous Research and its contributors. This fork keeps the MIT license, credits upstream, and tracks it through sync pull requests. It is not an official Nous Research release: use upstream for the stock experience, and read this section to know what you get here instead.
 
-The fork exists to run Hermes as an unattended, multi-profile work system on a small set of local machines, and the additions below follow from that. Each links to the developer guide where one exists.
+### Scale and provenance
 
-| Area | What this fork adds |
-|---|---|
-| **Kanban as an evidence-backed work queue** | Read-only board inspection and census that never initialise or modify a store ([guide](website/docs/developer-guide/kanban-readonly-inspection.md)); digest-bound artifact and source acceptance that records "accepted, execution still restricted" separately from running a card ([guide](website/docs/developer-guide/kanban-artifact-acceptance.md)); project/board binding, task revisions, idempotent enqueue serialised with creation, and exact-card dispatch windows; guarded orphan-run recovery ([doc](docs/kanban-orphan-recovery.md)). |
-| **Safe unattended operation** | An ESTOP pause that gates cron and dispatch, startup writer holds with custody records, a prospective reboot checkpoint for closing legacy writer holds ([guide](website/docs/developer-guide/startup-writer-reboot-recovery.md)), gateway drain on shutdown and update, and diagnostics that tell a busy lock from a malformed record. |
-| **Managed local inference** | A local runtime layer for Hermes-managed llama.cpp models with generation evidence, router reconciliation ([guide](website/docs/developer-guide/local-router-reconciliation.md)), per-model and per-profile concurrency caps, and routing that keeps an explicit local pin local. |
-| **Automation producers** | Cron job producers that enqueue Kanban work through the normal API (for example the dependency-health producer), and a GitHub PR-feedback plugin ([source](plugins/github-pr-feedback)). |
-| **Desktop and fleet** | A Kanban board plugin and fleet status in the Desktop app, plus fleet claim recovery ([guide](website/docs/developer-guide/fleet-claim-recovery.md)). |
-| **Fork CI policy** | Hosted-runner CI tuned for a fork: per-workload cancellation, serial network-upgrade tests, and Windows native lanes that are advisory on branch pushes and pull requests but still required for releases and tags. |
+As of November 4, 2026 the fork is **3,154 commits ahead of and 231 behind** upstream `main`. Roughly 2,400 of the commits are non-merge commits, spread over about 370 merged pull requests. The work began in late August 2026: about 300 commits that month, 1,100 in September, 930 in October, with the last upstream sync on November 3.
 
-Local setup for contributors is in [fork-local-environment](website/docs/developer-guide/fork-local-environment.md). This repository also holds project material that is not part of the agent, such as `docs/lunar-city`.
+The history is unusually test- and fix-heavy: about 1,360 `fix`, 230 `test`, 100 `feat` and 80 `ci` commits by subject. That reflects what the fork is for. It is a place where Hermes runs unattended and the failures that matter are the quiet ones.
 
-Fixes that are useful to everyone belong upstream; we send them there when they apply cleanly to stock Hermes.
+Area counts below are rough keyword tallies of commit subjects, not audited totals.
+
+Commits come from the maintainer, from AI coding agents (Codex and Claude sessions, whose commits carry their attribution), and from a governed automation account used for pull-request feedback. Agent changes go through the same pull-request and CI gates as everyone else's.
+
+### What the fork is for
+
+Upstream Hermes is a personal agent you talk to. This fork treats Hermes as an **unattended, multi-profile work system**: many specialised profiles pull cards from a Kanban board, run on schedules, use local and hosted models, and must be safe to leave running or to stop at any moment. Most of the additions are the machinery that makes that trustworthy: evidence, custody, bounds and recovery.
+
+### What is different, by area
+
+**Kanban as an evidence-backed work queue** (roughly 290 commits)
+- Read-only board inspection and census that never initialise, migrate or write a store, using WAL snapshots ([guide](website/docs/developer-guide/kanban-readonly-inspection.md)).
+- Digest-bound artifact acceptance and source acceptance. The board can say "artifact accepted, execution still restricted" without archiving or dispatching the card ([guide](website/docs/developer-guide/kanban-artifact-acceptance.md)).
+- Project and board binding, versioned task revisions, enforced board topology, and idempotent enqueue serialised with card creation.
+- Exact-card dispatch windows that run one assigned card on an idle board while everything else stays held.
+- Worker liveness you can trust: PID birth fingerprints, a watchdog, guarded orphan-run recovery with bound preimages and undo ([doc](docs/kanban-orphan-recovery.md)), and shutdown and restart handoff.
+- Capacity and routing: per-model and per-profile concurrency caps, routing precedence, and endpoint isolation that keeps an explicit local pin local.
+- Coordination contracts: a versioned coordination-event contract and a bounded compact-context contract.
+
+**Safe unattended operation**
+- An `ESTOP` pause that gates cron and dispatch together.
+- Startup writer holds with custody records, a prospective reboot checkpoint for closing legacy holds, and gateway drain for shutdown and update ([guide](website/docs/developer-guide/startup-writer-reboot-recovery.md)).
+- Diagnostics that tell a busy lock from a malformed record or an inaccessible reference, and trusted-commit guards held through runtime state transactions.
+
+**Egress, privacy and receipts**
+- Egress-safe projections, for example the run history that `cronjob_manage` exposes, and private receipts with bounded turn lineage.
+- Policy-bound, exact-note learning reads, and task-scoped execution artifacts with a provenance record. Their broker and reservations ship disabled until they are accepted on a real run.
+- The rule behind all of it: a durable admission, a model call, a terminal result and a user acknowledgement are separate receipts, and none stands in for another.
+
+**Managed local inference**
+- A local runtime layer for Hermes-managed llama.cpp, with generation evidence, request-scoped cancellation that verifies the server is idle, memory-bound measurement, and reconciliation of router records left by a previous kernel boot ([guide](website/docs/developer-guide/local-router-reconciliation.md)).
+- Profiles that route manifest-declared local models through llama.cpp, with an offline profile-readiness audit.
+
+**Cron and automation producers**
+- Producers that enqueue Kanban work through the normal API instead of spawning agents directly, such as the dependency-health producer, with bounded workers and retries.
+- Occurrence bookkeeping and duplicate suppression for scheduled jobs.
+
+**GitHub pull-request feedback** ([plugin](plugins/github-pr-feedback))
+- Gated, metadata-only PR intake; a single exact-head conflict-repair dispatch; PR stack lifecycle; handling of superseded review feedback; and label-taxonomy reconciliation.
+- Local CI results admitted through governed receipt contracts.
+
+**Fleet and federation**
+- A federated Kanban runner pool supervised from the Desktop app, with measured throughput telemetry, ambiguous-claim recovery that settles atomically ([guide](website/docs/developer-guide/fleet-claim-recovery.md)), and worker groups expressed as profiles.
+- An inter-agent messaging tool, a cross-engineering memory index, and a shared `~/.agents/skills` directory with `.codex` and `.claude` project subdirectories.
+
+**Desktop** (roughly 190 commits)
+- A Kanban board plugin, fleet status, runner throughput on the board, and reload and reattach reconciliation that keeps live reply text consistent across a resume.
+
+**Windows, installers and updates**
+- Native Windows fixes (roughly 75 commits), including SSH handling, and a real install-and-update end-to-end matrix with a red-tracker that shows each leg's history.
+
+**CI and release engineering** (roughly 340 commits)
+- Hosted-runner CI for a fork, with exact-head qualification of changes, real install, update and Gateway-handoff end-to-end suites, and nightly runs whose failures are kept as evidence rather than retried away.
+- The intended policy is that Windows native lanes are advisory on branch pushes and pull requests and still required for releases and tags. A repair for that policy after the repository rename is in review.
+- Work to cut CI queue and checkout overhead without dropping any test selection is also in review.
+
+**Project material that is not the agent**
+- `docs/lunar-city` and the Desktop Lunar City world are an in-repo project built on Hermes. They are independent of the agent runtime.
+
+### What stays stock
+
+The agent core, the TUI, the messaging gateway, skills, memory and the stock provider setup behave as upstream. The fork's rules are the same as upstream's: [`AGENTS.md`](AGENTS.md) describes the narrow-core and plugin design, and per-conversation prompt caching is kept intact. Anything that changes behaviour does so behind a profile, a plugin, a CLI command or an opt-in gate.
+
+### Relationship to upstream
+
+- We merge upstream regularly through reviewed sync pull requests, and we carry some in-flight upstream work forward (for example specialist-discovery receipts and compression transport upgrades) until it lands there.
+- Fixes that are useful to everyone belong upstream. We have sent some, though less often lately; the ready-work-before-decomposition and egress-boundary proposals are still open as NousResearch/hermes-agent#97368 and #97370. We intend to resume upstreaming.
+- Expect some paths to differ from upstream while a change waits for review there. File fork-specific issues here and stock Hermes issues upstream.
+
+### Where to read more
+
+- Fork setup: [fork-local-environment](website/docs/developer-guide/fork-local-environment.md)
+- Developer guide: [`website/docs/developer-guide`](website/docs/developer-guide) (Kanban inspection and acceptance, execution artifacts, startup recovery, local router, fleet recovery)
+- Operations notes: [`docs/operations`](docs/operations) and [`docs/kanban`](docs/kanban)
 
 ---
 
