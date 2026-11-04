@@ -16,12 +16,7 @@ from hermes_cli import lifecycle, plugins
 from agent import relay_runtime
 from hermes_cli.observability import relay_shared_metrics
 from hermes_cli.plugins import PluginManager
-
-
-class _Request:
-    def __init__(self, headers: dict[str, Any], content: dict[str, Any]) -> None:
-        self.headers = headers
-        self.content = content
+from tests.hermes_cli.relay_metrics_fixture import _Request, install_native_plugin_protocol
 
 
 class _ToolExecutionResult:
@@ -58,6 +53,7 @@ class _Relay:
             flush=self._flush,
         )
         self.get_scope_stack = self._get_scope_stack
+        install_native_plugin_protocol(self)
 
     def _scope_push(self, name: str, scope_type: Any, **kwargs: Any) -> Any:
         self._scope_serial += 1

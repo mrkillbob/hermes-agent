@@ -279,7 +279,8 @@ class PluginDispatchMixin:
         what they declare. Each callback is isolated. Bounded hooks and policy hooks run under
         ``plugins.hook_callback_timeout`` (worker abandoned, never joined). Policy timeouts block;
         ``pre_kanban_complete`` also blocks on callback exceptions. Observer failures skip. ``_HOOK_CALLER_THREAD_HOOKS`` always run on the
-        caller thread. ``pre_llm_call`` may return ``{"context": "..."}`` (or a str) to inject.
+        caller thread. ``pre_llm_call`` may return ``{"context": "..."}`` (or a str) to inject, or
+        ``{"action": "block", "message": "..."}`` to end the turn before any inference request.
         """
         from agent.safe_worker_policy import safe_worker_enabled
 

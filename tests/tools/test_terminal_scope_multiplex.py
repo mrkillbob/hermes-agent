@@ -303,3 +303,19 @@ def test_launch_turn_binds_terminal_scope_once_multiplexing_is_active(
     finally:
         reset_terminal_scope(token)
     assert get_terminal_scope() is None
+
+
+@pytest.mark.parametrize("prepared", [None, {"TERMINAL_ENV": "local"}])
+def test_startup_hold_refuses_prepared_and_unprepared_policy(tmp_path, monkeypatch, prepared):
+    """A prepared policy cannot bypass a hold engaged before scope installation."""
+    from tools.terminal_scope import install_and_reset_profile_terminal_scope
+
+    monkeypatch.setattr("hermes_cli.startup_hold.active", lambda: True)
+    prior = get_terminal_scope()
+    with install_and_reset_profile_terminal_scope(tmp_path, prepared=prepared):
+        scope = get_terminal_scope()
+        assert isinstance(scope, TerminalPolicyRefusal)
+        assert scope.reason == "startup_hold"
+        with pytest.raises(TerminalPolicyUnavailable, match="startup_hold"):
+            terminal_env("TERMINAL_ENV")
+    assert get_terminal_scope() is prior

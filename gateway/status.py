@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, UTC
 from pathlib import Path
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, Iterable, NamedTuple, Optional
 from hermes_dir_acl import make_user_dir
 
 from gateway.status_inline_source import (
@@ -1086,7 +1086,7 @@ def _prepare_runtime_status_update(
     parked_profiles: Any = _UNSET, multiplex_standalone_reason: Any = _UNSET,
     platform_metrics: Any = _UNSET,
     ingress_url: Any = _UNSET, listener_base: Any = _UNSET, clear_profile_platforms: bool = False,
-    drop_profile_platforms: Optional[str] = None,
+    drop_profile_platforms: Optional[str] = None, keep_platforms: Iterable[str] = (),
     drop_platforms: Optional[list[str]] = None,
     load_existing: bool = True, reload_existing: bool = False,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
@@ -1111,7 +1111,7 @@ def _prepare_runtime_status_update(
             payload["platforms"] = {
                 k: v for k, v in payload["platforms"].items()
                 if not isinstance(k, str) or ":" not in k
-                or (drop_prefix is not None and not k.startswith(drop_prefix))
+                or (drop_prefix is not None and not k.startswith(drop_prefix)) or k in keep_platforms
             }
         if drop_platforms:
             dropped = set(drop_platforms)

@@ -141,3 +141,26 @@ def rewrite_prompt_model_identity(agent, model: str, provider: str) -> None:
     agent._cached_system_prompt = sp
     if public_context:
         agent._remote_task_public_prompt = sp
+
+
+def requires_direct_kanban_tools(agent) -> bool:
+    """Protected workers use tool results with supported provenance bindings.
+
+    Programmatic execute_code aggregates lose their individual producer proofs.
+    Keep them out of the worker scope, including protected fallback routes;
+    ordinary interactive and exclusively local sessions retain their scope.
+    """
+    import os
+
+    if os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1":
+        return True
+    if not str(os.environ.get("HERMES_KANBAN_TASK") or "").strip():
+        return False
+    from agent.llm_egress_runtime import provider_uses_egress_firewall
+
+    providers = [getattr(agent, "provider", None)]
+    providers.extend(
+        entry.get("provider") for entry in (getattr(agent, "_fallback_chain", None) or [])
+        if isinstance(entry, dict)
+    )
+    return any(provider_uses_egress_firewall(provider) for provider in providers)

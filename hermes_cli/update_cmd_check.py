@@ -53,6 +53,24 @@ def clear_git_debris(root: Path) -> None:
     settle_partial_clone_maintenance(root)
 
 
+def prepare_checkout_locks(root: Path) -> None:
+    """Release proven-dead checkout locks before the update starts its git work."""
+    # Self-heal abandoned .git/*.lock files (a crashed fetch) and aborted-transfer pack temps
+    # before anything else touches the checkout. Run at START, before the apply path:
+    # a run that dies between here and the fetch would otherwise leave the next run to
+    # fail with "File exists" until an operator removed the lock by hand (#132089). Idempotent,
+    # and _sweep_stale skips everything while a git process holds it. A killed update's
+    # index.lock is younger than the sweep's age floor, so it goes here once its git is proven
+    # dead (we hold the update lock: no other update's git can own it). Its killed fetch's ref
+    # and shallow locks likewise, or every later fetch fails ("reference already exists").
+    from hermes_cli.gitlock import release_dead_fetch_locks, release_dead_index_lock
+    if release_dead_index_lock(root):
+        print("  (removed .git/index.lock left by a git that was killed)")
+    for lock in release_dead_fetch_locks(root):
+        print(f"  (removed {lock} left by a git that was killed)")
+    clear_git_debris(root)
+
+
 def report_pack_tidy(root: Path) -> None:
     """Spend the update's bounded slice on a partial clone's on-demand packs, and say what it did."""
     from hermes_cli.git_pack_tidy import TIDY_BUDGET_SECONDS, tidy_partial_clone_packs

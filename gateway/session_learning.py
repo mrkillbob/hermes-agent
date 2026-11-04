@@ -60,6 +60,8 @@ class _Decision:
     reference: CapturedReference | None = None
     admission_id: str | None = None
     delivery_generation: int | None = None
+    observation: object = None
+    admission: object = None
 
 
 class LearningBroker:
@@ -142,15 +144,31 @@ class LearningBroker:
             # Volatile decisions expire, including their bounded captured context.
             # Removing an expired opaque ID cannot make it valid again.
             now = time.monotonic()
-            self._decisions = {key: value for key, value in self._decisions.items()
-                               if now < value.expires_at}
+            retained = {}
+            for key, value in self._decisions.items():
+                if now < value.expires_at or value.admission is not None:
+                    retained[key] = value
+                    if now >= value.expires_at:
+                        value.reference = None
+                        if value.status not in {'revoked', 'uncertain'}:
+                            value.status = 'expired'
+            self._decisions = retained
             if len(self._decisions) >= 64:
                 _deny('session_busy')
-            live, fence = self._fence(connection, ref)
+        live, fence = self._fence(connection, ref)
+        observation = None
+        if getattr(self.authority, '_binding_generation', None) is not None:
+            from gateway.session_binding_generation import BindingScope, observe
+            observation = observe(self.authority, BindingScope(
+                connection.actor.subject, connection.actor.transport_id,
+                ref.profile_id, ref.session_id))
+        with self._gate:
+            if len(self._decisions) >= 64:
+                _deny('session_busy')
             decision_id = secrets.token_hex(24)
             self._decisions[decision_id] = _Decision(
                 connection, live, fence, request_id, snapshot,
-                time.monotonic() + lifetime_s, secrets.token_hex(24))
+                time.monotonic() + lifetime_s, secrets.token_hex(24), observation=observation)
             return decision_id
 
     def _selected(self, connection, decision_id, request_id):
@@ -182,8 +200,12 @@ class LearningBroker:
             _deny('invalid_params')
         with self._gate:
             selected = self._selected(connection, decision_id, request_id)
-            self._unchanged(selected)
             if selected.status != 'pending':
+                _deny()
+        self._unchanged(selected)
+        with self._gate:
+            if (self._selected(connection, decision_id, request_id) is not selected
+                    or selected.status != 'pending'):
                 _deny()
             selected.status = 'approved' if choice == 'once' else 'revoked'
             return {'decision_id': decision_id, 'status': selected.status}
@@ -195,51 +217,79 @@ class LearningBroker:
             ref = SessionRef(selected.fence.profile_id, selected.fence.logical_session_id)
             self._native_live(connection, ref, admission=False)
             selected.status = 'revoked'
+            selected.reference = None
+            if selected.admission is not None and selected.admission.active:
+                _deny('reference_commit_busy')
+
+    async def revoke_and_wait(self, connection, *, decision_id, request_id):
+        """Complete record revocation without blocking the owner loop on a commit."""
+        from gateway.session_learning_admission import revoke_and_wait
+        return await revoke_and_wait(self, connection, decision_id, request_id)
+
+    async def admit(self, connection, *, decision_id, request_id):
+        """HOST ONLY: metadata admission, not a registered delivery/model operation."""
+        from gateway.session_learning_admission import admit
+        return await admit(self, connection, decision_id, request_id)
+
+    async def admission_receipt(self, connection, *, decision_id, request_id):
+        """Read the original durable metadata row; never infer session use."""
+        from gateway.session_learning_admission import admission_receipt
+        return await admission_receipt(self, connection, decision_id, request_id)
 
     def capture(self, connection, *, decision_id, request_id):
-        """One library read of the host-selected buffer, without scan or fallback.
+        """One bounded read; release state lock during filesystem I/O.
 
-        Source candidate only: this is not session admission or delivery. It is
-        intentionally not registered as a production method until the common gate
-        with connection close and owner admission is implemented and reviewed.
+        Revocation can discard an in-flight read, never recall bytes already read.
+        This is capture only, not admission, session delivery or a model call.
         """
         with self._gate:
             selected = self._selected(connection, decision_id, request_id)
-            self._unchanged(selected)
             if selected.status != 'approved':
                 _deny()
             selected.status = 'reading'
-            def authorize(request):
-                self._unchanged(selected)
-                return request == selected.exact and selected.status == 'reading'
-            try:
-                node, diagnostic = read_exact_vault_learning(selected.exact, authorize=authorize)
+
+        def authorize(request):
+            with self._gate:
+                if selected.status != 'reading':
+                    return False
+            self._unchanged(selected)
+            with self._gate:
+                return (self._selected(connection, decision_id, request_id) is selected
+                        and selected.status == 'reading' and request == selected.exact)
+
+        try:
+            self._unchanged(selected)
+            node, diagnostic = read_exact_vault_learning(selected.exact, authorize=authorize)
+            with self._gate:
+                if selected.status != 'reading':
+                    _deny()
                 if diagnostic is not None or node is None:
                     selected.status = 'refused'
                     _deny('reference_refused')
-                self._unchanged(selected)
-                reference = CapturedReference.from_node(
-                    node, raw_sha256=selected.exact.expected_sha256)
-                self._unchanged(selected)
-                if selected.status != 'reading':
+            self._unchanged(selected)
+            reference = CapturedReference.from_node(node, raw_sha256=selected.exact.expected_sha256)
+            self._unchanged(selected)
+            with self._gate:
+                if (self._selected(connection, decision_id, request_id) is not selected
+                        or selected.status != 'reading'):
                     _deny()
-                selected.reference = reference
-            except RuntimeStoreError:
+                selected.reference, selected.status = reference, 'captured'
+                return self._metadata(decision_id, selected)
+        except RuntimeStoreError:
+            with self._gate:
                 if selected.status == 'reading':
                     selected.status = 'uncertain'
-                raise
-            except Exception:  # health: allow BLE001 -- Bound capture failures without disclosing note data or arbitrary exception text.
-                # Stable refusal only; no path, body, or arbitrary exception text.
+            raise
+        except Exception:  # health: allow BLE001 -- Bound capture failures without disclosing note data or arbitrary exception text.
+            with self._gate:
                 if selected.status == 'reading':
                     selected.status = 'uncertain'
-                raise RuntimeStoreError('reference_unavailable') from None
-            except BaseException:
-                # Any uncertain I/O outcome consumes this attempt; no automatic retry.
+            raise RuntimeStoreError('reference_unavailable') from None
+        except BaseException:
+            with self._gate:
                 if selected.status == 'reading':
                     selected.status = 'uncertain'
-                raise
-            selected.status = 'captured'
-            return self._metadata(decision_id, selected)
+            raise
 
     def _metadata(self, decision_id, selected):
         from dataclasses import asdict
