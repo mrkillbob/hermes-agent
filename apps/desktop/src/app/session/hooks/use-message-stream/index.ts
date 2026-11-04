@@ -53,7 +53,13 @@ import { bindStoppedTurnReceipt, extendInterruptedReply } from './interrupted-re
 import { isPersistedInterimCompletion } from './persisted-completion'
 import { bindReceiptUserRows } from './receipt-user-rows'
 import { currentResponseParts, mergeCurrentResponseText } from './response-parts'
-import { admitSegmentDelta, admitSegmentSeal, type SegmentCursor, type SegmentStamp } from './segment-identity'
+import {
+  admitSegmentDelta,
+  admitSegmentSeal,
+  noteLiveSegmentStart,
+  type SegmentCursor,
+  type SegmentStamp
+} from './segment-identity'
 import { completionErrorText, delegateTaskPayloads, MAX_STREAM_FLUSH_GAP_MS, STREAM_DELTA_FLUSH_MS } from './utils'
 
 interface MessageStreamOptions {
@@ -527,8 +533,10 @@ export function useMessageStream({
       }
 
       if (stamp) {
-        const admitted = admitSegmentDelta(segmentCursorsRef.current.get(sessionId), stamp, delta)
+        const cursorBefore = segmentCursorsRef.current.get(sessionId)
+        const admitted = admitSegmentDelta(cursorBefore, stamp, delta)
         segmentCursorsRef.current.set(sessionId, admitted.cursor)
+        noteLiveSegmentStart(sessionId, cursorBefore, stamp)
         delta = admitted.text
       }
 

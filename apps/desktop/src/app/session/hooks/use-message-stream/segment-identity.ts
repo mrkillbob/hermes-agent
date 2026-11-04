@@ -79,3 +79,29 @@ export function admitSegmentSeal(
 
   return { cursor: next, fresh: true }
 }
+
+/**
+ * Where a runtime's live reply began on the wire: the first delta this window
+ * applied for the turn's current segment. A resume snapshot cut at an unknown
+ * point reconciles against it, because only a delta that starts at or after the
+ * snapshot's end is new text and one that starts earlier overlaps it.
+ */
+export interface LiveSegmentStart {
+  turnId: string
+  segment: number
+  start: number
+}
+
+const liveSegmentStarts = new Map<string, LiveSegmentStart>()
+
+export function noteLiveSegmentStart(sessionId: string, cursorBefore: SegmentCursor | undefined, stamp: SegmentStamp) {
+  const opensSegment = !cursorBefore || cursorBefore.turnId !== stamp.turnId || stamp.segment > cursorBefore.segment
+
+  if (opensSegment) {
+    liveSegmentStarts.set(sessionId, { turnId: stamp.turnId, segment: stamp.segment, start: stamp.offset ?? 0 })
+  }
+}
+
+export const liveSegmentStart = (sessionId: string): LiveSegmentStart | undefined => liveSegmentStarts.get(sessionId)
+
+export const clearLiveSegmentStart = (sessionId: string) => void liveSegmentStarts.delete(sessionId)

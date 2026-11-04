@@ -1419,10 +1419,44 @@ export function removeRepresentedLocalLiveProjection(
  * replace the older activation row; only rows added or changed since the warm
  * cache baseline are appended. This is identity-based, never text-based.
  */
+/**
+ * Wire coverage for a runtime first seen before its resume ACK: the snapshot's
+ * reply text ends at `snapshotEnd` and the pre-ACK live reply began at
+ * `liveStart` (both UTF-16 offsets within the same segment). A live row that
+ * starts at or after the snapshot's end is new; one that starts earlier
+ * repeats the overlap, which the snapshot already carries.
+ */
+export interface ResumeLiveCoverage {
+  liveStart: number
+  snapshotEnd: number
+}
+
+function dropLeadingText(parts: ChatMessage['parts'], count: number): ChatMessage['parts'] {
+  let left = count
+
+  return parts.flatMap(part => {
+    if (left <= 0 || part.type !== 'text') {
+      return [part]
+    }
+
+    if (part.text.length <= left) {
+      left -= part.text.length
+
+      return []
+    }
+
+    const kept = { ...part, text: part.text.slice(left) }
+    left = 0
+
+    return [kept]
+  })
+}
+
 export function overlayConcurrentMessageChanges(
   nextMessages: ChatMessage[],
   baselineMessages: ChatMessage[],
-  currentMessages: ChatMessage[]
+  currentMessages: ChatMessage[],
+  coverage?: ResumeLiveCoverage
 ): ChatMessage[] {
   const baselineById = new Map(baselineMessages.map(message => [message.id, message]))
   const nextIndexById = new Map(nextMessages.map((message, index) => [message.id, index]))
@@ -1545,8 +1579,11 @@ export function overlayConcurrentMessageChanges(
       const activationText = chatMessageText(activationStream)
       const currentText = chatMessageText(current)
 
-      const replacement =
-        activationText && !currentText.startsWith(activationText)
+      const overlap = coverage ? Math.max(0, coverage.snapshotEnd - coverage.liveStart) : 0
+
+      const replacement = overlap
+        ? { ...current, parts: concatPartsByToolCall(activationStream.parts, dropLeadingText(current.parts, overlap)) }
+        : activationText && !currentText.startsWith(activationText)
           ? { ...current, parts: concatPartsByToolCall(activationStream.parts, current.parts) }
           : current
 
