@@ -9,25 +9,26 @@ import stat
 from hermes_constants import get_default_hermes_root
 
 
-def _refuse():
-    raise RuntimeError('startup_hold_writers_busy')
+def _refuse(detail='checkpoint_inventory_invalid'):
+    from hermes_cli.startup_hold_diagnostics import WriterRefusal
+    raise WriterRefusal('writer_inventory', detail)
 
 
 def _record(raw):
     try:
         value = json.loads(raw)
     except (ValueError, UnicodeError):
-        _refuse()
+        _refuse('record_json_invalid')
     if (not isinstance(value, dict) or set(value) != {'schema', 'pid', 'create_time', 'state'}
             or type(value['schema']) is not int or value['schema'] != 1
             or type(value['pid']) is not int or value['pid'] <= 0
             or value['state'] not in {'unsettled', 'quiescent', 'exit_ready'}):
-        _refuse()
+        _refuse('record_shape_invalid')
     birth = value['create_time']
     if birth is None and value['state'] == 'unsettled':
         return value
     if type(birth) not in (int, float) or not math.isfinite(birth) or birth <= 0:
-        _refuse()
+        _refuse('record_birth_invalid')
     return value
 
 
@@ -36,7 +37,7 @@ def _secure(info, directory=False):
     kind = stat.S_ISDIR if directory else stat.S_ISREG
     if (not kind(info.st_mode) or info.st_uid != _uid() or info.st_mode & 0o022
             or (not directory and info.st_nlink != 1)):
-        _refuse()
+        _refuse('unsafe_directory' if directory else 'unsafe_reference')
 
 
 class WriterSnapshot:
@@ -62,16 +63,22 @@ class WriterSnapshot:
             return {'directory': None, 'files': []}
         info = self.directory.lstat()
         _secure(info, directory=True)
-        if _version(info) != self.version or sorted(p.name for p in self.directory.iterdir()) != sorted(self.files):
-            _refuse()
+        if _version(info) != self.version:
+            _refuse('directory_identity_changed')
+        if sorted(p.name for p in self.directory.iterdir()) != sorted(self.files):
+            _refuse('membership_changed')
         rows = []
         for name, (fd, version, raw) in sorted(self.files.items()):
             named = (self.directory / name).lstat()
             _secure(named)
             os.lseek(fd, 0, os.SEEK_SET)
             current = os.read(fd, 1025)
-            if (_version(named) != version or _version(os.fstat(fd)) != version or current != raw):
-                _refuse()
+            if _version(named) != version:
+                _refuse('named_reference_changed')
+            if _version(os.fstat(fd)) != version:
+                _refuse('opened_reference_changed')
+            if current != raw:
+                _refuse('record_bytes_changed')
             rows.append({'name': name, 'version': list(version), 'sha256': hashlib.sha256(raw).hexdigest()})
         return {'directory': list(self.version), 'files': rows}
 
@@ -96,14 +103,14 @@ def capture_writers():
             named = path.lstat()
             _secure(named)
             if named.st_size > 1024 or len(files) >= 128:
-                _refuse()
+                _refuse('inventory_limit')
             fd = open_hold(path)
             if fd is None:
-                _refuse()
+                _refuse('reference_unavailable')
             files[path.name] = (fd, _version(named), b'')
             raw = os.read(fd, 1025)
             if len(raw) != named.st_size:
-                _refuse()
+                _refuse('short_read')
             _record(raw)
             files[path.name] = (fd, _version(named), raw)
         snapshot = WriterSnapshot(directory, _version(info), files)

@@ -21,7 +21,7 @@ BOOT_FILES = (
     "pm/environments.py", "pm/filesystem.py",
     "pm/lifetime.py", "pm/lifetime_handles.py", "pm/lifetime_cleanup.py",
     "pm/paths.py", "hermes_cli/runtime_state.py",
-    "hermes_cli/_early_recovery.py", "hermes_cli/_parser.py", "hermes_cli/startup_hold.py",
+    "hermes_cli/_early_recovery.py", "hermes_cli/_parser.py", "hermes_cli/startup_hold.py", "hermes_cli/startup_hold_diagnostics.py",
     "hermes_cli/venv_sync.py", "hermes_cli/steward.py",
     "hermes_cli/stderr_timestamp.py",
     "scripts/hermes-gateway",
