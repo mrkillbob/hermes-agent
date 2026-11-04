@@ -21,6 +21,8 @@ import {
 import { clearAllSessionStates } from '@/store/session-states'
 import type { SessionMessage, SessionResumeResult } from '@/types/hermes'
 
+import { deferred } from '../../../test/deferred'
+
 import { useMessageStream } from './use-message-stream'
 import { useSessionActions } from './use-session-actions'
 import { useSessionStateCache } from './use-session-state-cache'
@@ -41,6 +43,7 @@ vi.mock('@/store/profile', async original => ({
 const storedId = 'reload-stream-target'
 const runtimeId = 'reload-runtime'
 const noop = async () => undefined
+const unexpectedTransport = vi.fn(() => { throw new Error('Unexpected live transport in inert resume test') })
 
 const storedRows: SessionMessage[] = [
   { id: 1, role: 'user', content: 'U1 first', timestamp: 10 },
@@ -85,11 +88,14 @@ function mount(snapshot: SessionResumeResult) {
       refreshSessions: noop
     })
 
-    return { cache, actions, stream }
+    return { cache, actions, stream, requestGateway }
   })
 }
 
 beforeEach(() => {
+  unexpectedTransport.mockClear()
+  vi.stubGlobal('fetch', unexpectedTransport)
+  vi.stubGlobal('WebSocket', unexpectedTransport)
   vi.useFakeTimers()
   localStorage.clear()
   clearAllSessionStates()
@@ -124,16 +130,21 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  cleanup()
-  clearAllSessionStates()
-  resetInFlightTurnJournalStateForTests()
-  localStorage.clear()
-  setSessions([])
-  setMessages([])
-  setActiveSessionId(null)
-  setSelectedStoredSessionId(null)
-  vi.useRealTimers()
-  vi.restoreAllMocks()
+  try {
+    cleanup()
+    clearAllSessionStates()
+    resetInFlightTurnJournalStateForTests()
+    localStorage.clear()
+    setSessions([])
+    setMessages([])
+    setActiveSessionId(null)
+    setSelectedStoredSessionId(null)
+    vi.useRealTimers()
+    expect(unexpectedTransport).not.toHaveBeenCalled()
+  } finally {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  }
 })
 
 /** The window before the reload journaled its live row (throttled write). */
@@ -199,4 +210,90 @@ it.each([
   })
 
   expect(replies().map(row => chatMessageText(row).trim())).toEqual(['A2 finished after the reload'])
+})
+
+it.each([false, true])('keeps a first-seen pending reply when the ACK already includes its delta: %s', async snapshotIncludesDelta => {
+  const prefix = 'A2 '
+  const suffix = 'answer across a reload'
+  const callId = 'reload-pending-tool'
+  const durable: SessionMessage[] = [
+    ...storedRows,
+    {
+      id: 4, role: 'assistant', content: 'A2i narration', timestamp: 21,
+      tool_calls: [{ id: callId, type: 'function', function: { name: 'terminal', arguments: '{}' } }]
+    },
+    { id: 5, role: 'tool', content: 'retained tool result', tool_call_id: callId, timestamp: 22 }
+  ]
+  const snapshot = {
+    session_id: runtimeId, resumed: storedId, messages: durable,
+    message_count: durable.length, running: true, turn_started_at: 19,
+    inflight: { user: 'U2 second', assistant: prefix + (snapshotIncludesDelta ? suffix : ''), streaming: true }
+  } as SessionResumeResult
+  const ack = deferred<SessionResumeResult>()
+  const { result } = mount(snapshot)
+  result.current.requestGateway.mockImplementation((method: string) => {
+    expect(method).toBe('session.resume')
+    return ack.promise
+  })
+  vi.mocked(getLatestSessionMessages).mockResolvedValue({ session_id: storedId, messages: durable })
+  let pending: Promise<unknown> | undefined
+
+  try {
+    await act(async () => {
+      pending = result.current.actions.resumeSession(storedId, true)
+      await vi.waitFor(() => expect(result.current.requestGateway).toHaveBeenCalledWith('session.resume', expect.anything()))
+    })
+
+    expect(result.current.cache.sessionStateByRuntimeIdRef.current.has(runtimeId)).toBe(false)
+    expect(result.current.cache.activeSessionIdRef.current).toBeNull()
+
+    const send = (text: string, offset: number) => act(() => {
+      result.current.stream.handleGatewayEvent({
+        session_id: runtimeId, type: 'message.delta',
+        payload: { text, turn_id: 'reload-pending-turn', segment: 1, offset }
+      } as GatewayEvent)
+    })
+
+    // The new socket sees only this suffix: its prefix is in the pending ACK.
+    act(() => { result.current.cache.ensureSessionState(runtimeId, storedId) })
+    send(suffix, prefix.length)
+    await act(async () => vi.advanceTimersByTimeAsync(150))
+    const state = () => result.current.cache.sessionStateByRuntimeIdRef.current.get(runtimeId)!
+    expect(state().messages.map(chatMessageText).join('')).toBe(suffix)
+    expect(result.current.cache.activeSessionIdRef.current).toBeNull()
+
+    await act(async () => {
+      ack.resolve(snapshot)
+      await pending
+    })
+    await act(async () => vi.advanceTimersByTimeAsync(150))
+
+    const replies = () => state().messages.filter(row => row.role === 'assistant' && chatMessageText(row).includes(prefix))
+    const assertReply = (expected: string) => {
+      expect(replies()).toHaveLength(1)
+      const lastPrompt = state().messages.findLastIndex(row => row.role === 'user')
+      const assistantTail = state().messages.slice(lastPrompt + 1).filter(row => row.role === 'assistant')
+      expect(assistantTail.map(chatMessageText).join('')).toBe('A2i narration' + expected)
+      expect(chatMessageText(replies()[0])).toContain(expected)
+      expect(replies()[0].pending).toBe(true)
+      expect(state().streamId).toBe(replies()[0].id)
+      expect(state().busy).toBe(true)
+      expect(state().messages.map(chatMessageText).join('\n')).toContain('A2i narration')
+      const tools = state().messages.flatMap(row => row.parts).filter(part =>
+        part.type === 'tool-call' && part.toolCallId === callId
+      )
+      expect(tools).toHaveLength(1)
+      expect(JSON.stringify(tools[0])).toContain('retained tool result')
+    }
+    assertReply(prefix + suffix)
+
+    send(' more', prefix.length + suffix.length)
+    await act(async () => vi.advanceTimersByTimeAsync(150))
+    assertReply(prefix + suffix + ' more')
+  } finally {
+    await act(async () => {
+      ack.resolve(snapshot)
+      await pending
+    })
+  }
 })

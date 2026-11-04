@@ -175,6 +175,7 @@ import {
   rereadPageAfterResumeBarrier
 } from './resume-barrier-reread'
 import { clearResumeLatches, clearResumeToasts, notifyResumeFailed, type ResumeAttemptOptions } from './resume-latches'
+import { type ResumeBaseline, resumeRuntimeBaseline } from './resume-live-coverage'
 import {
   ambientResumeConnectionId,
   openResumeGateway,
@@ -209,6 +210,7 @@ import {
   findListedSession,
   goneSessionVerdict,
   isSessionGoneError,
+  overlayAgainstResumeBaseline,
   overlayConcurrentMessageChanges,
   patchSessionWorkspace,
   preserveEquivalentTranscript,
@@ -2013,7 +2015,7 @@ export function useSessionActions({
             ? null
             : getLatestSessionMessages(storedSessionId, sessionRestScope)
 
-        let resumeRuntimeBaselineMessages: ChatMessage[] = []
+        let resumeBaseline: ResumeBaseline = { messages: [] }
         const resumeStartedAt = Date.now() / 1000
 
         const resumePromise = singleFlightSessionResume(
@@ -2025,9 +2027,7 @@ export function useSessionActions({
             ),
           { requiresMessages: options?.authoritativeSnapshot, scope: sessionOwner }
         ).then(resumed => {
-          resumeRuntimeBaselineMessages = resumeRuntimeBaselines.has(resumed.session_id)
-            ? resumeRuntimeBaselines.get(resumed.session_id)!
-            : sessionStateByRuntimeIdRef.current.get(resumed.session_id)?.messages ?? []
+          resumeBaseline = resumeRuntimeBaseline(resumed, resumeRuntimeBaselines, sessionStateByRuntimeIdRef.current)
 
           return resumed
         })
@@ -2170,11 +2170,11 @@ export function useSessionActions({
         })()
 
         const currentRuntimeMessages =
-          sessionStateByRuntimeIdRef.current.get(resumed.session_id)?.messages ?? resumeRuntimeBaselineMessages
+          sessionStateByRuntimeIdRef.current.get(resumed.session_id)?.messages ?? resumeBaseline.messages
 
-        const preferredWithRuntimeChanges = overlayConcurrentMessageChanges(
+        const preferredWithRuntimeChanges = overlayAgainstResumeBaseline(
           preferredMessages,
-          resumeRuntimeBaselineMessages,
+          resumeBaseline,
           currentRuntimeMessages
         )
 

@@ -2,7 +2,7 @@
 import { resolveSessionRpcOwner } from '@/app/contrib/wiring-routing'
 import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-kinds'
 import { getSession } from '@/hermes'
-import { concatPartsByToolCall, sameAttachmentTurn, spliceOlderPreservedRows } from '@/lib/chat-messages'
+import { sameAttachmentTurn, spliceOlderPreservedRows } from '@/lib/chat-messages'
 import {
   assistantTextPart,
   type ChatMessage,
@@ -81,6 +81,7 @@ import {
   conflictingTranscriptIdentity,
   transcriptRowIds
 } from './pending-turn-identity'
+import { activationReplacement, type ResumeBaseline, type ResumeLiveCoverage } from './resume-live-coverage'
 import { reconcileOwnerApprovalMode } from './runtime-owner'
 import { publishSessionUsage } from './session-usage'
 
@@ -1422,7 +1423,8 @@ export function removeRepresentedLocalLiveProjection(
 export function overlayConcurrentMessageChanges(
   nextMessages: ChatMessage[],
   baselineMessages: ChatMessage[],
-  currentMessages: ChatMessage[]
+  currentMessages: ChatMessage[],
+  coverage?: ResumeLiveCoverage
 ): ChatMessage[] {
   const baselineById = new Map(baselineMessages.map(message => [message.id, message]))
   const nextIndexById = new Map(nextMessages.map((message, index) => [message.id, index]))
@@ -1542,13 +1544,7 @@ export function overlayConcurrentMessageChanges(
 
     if (activationStreamIndex >= 0 && current.role === 'assistant' && current.id.startsWith('assistant-stream-')) {
       const activationStream = overlaid[activationStreamIndex]
-      const activationText = chatMessageText(activationStream)
-      const currentText = chatMessageText(current)
-
-      const replacement =
-        activationText && !currentText.startsWith(activationText)
-          ? { ...current, parts: concatPartsByToolCall(activationStream.parts, current.parts) }
-          : current
+      const replacement = activationReplacement(activationStream, current, coverage)
 
       nextIndexById.delete(activationStream.id)
       nextIndexById.set(current.id, activationStreamIndex)
@@ -1590,6 +1586,10 @@ export function overlayConcurrentMessageChanges(
 
   return changed ? overlaid : nextMessages
 }
+
+/** Overlay the runtime's changes since the resume baseline, with that baseline's snapshot coverage. */
+export const overlayAgainstResumeBaseline = (next: ChatMessage[], base: ResumeBaseline, current: ChatMessage[]) =>
+  overlayConcurrentMessageChanges(next, base.messages, current, base.coverage)
 
 export interface BranchMessage {
   content: string
