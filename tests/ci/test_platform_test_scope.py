@@ -61,9 +61,9 @@ def test_native_scope_preserves_full_coverage_and_rejects_invalid_scope(tmp_path
 
 
 @pytest.mark.parametrize("repository,release,ref_type,windows_required", [
-    pytest.param("mrkillbob/hermes-agent", False, "branch", False, id="fork-source"),
-    pytest.param("mrkillbob/hermes-agent", True, "branch", True, id="fork-release"),
-    pytest.param("mrkillbob/hermes-agent", False, "tag", True, id="fork-tag"),
+    pytest.param("Coding-Sensations/hermes-agent", False, "branch", False, id="fork-source"),
+    pytest.param("Coding-Sensations/hermes-agent", True, "branch", True, id="fork-release"),
+    pytest.param("Coding-Sensations/hermes-agent", False, "tag", True, id="fork-tag"),
     pytest.param("NousResearch/hermes-agent", False, "branch", True, id="upstream"),
     pytest.param("someone/hermes-agent", False, "branch", True, id="other-fork"),
 ])
