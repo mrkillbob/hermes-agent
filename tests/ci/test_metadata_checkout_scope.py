@@ -166,7 +166,7 @@ def test_metadata_checkout_keeps_policy_coverage_without_application_payloads(tm
     body = next(step["run"] for step in steps if step.get("name") == step_name)
     cp = subprocess.run(
         ["bash", "-eu", "-o", "pipefail", "-c", body],
-        cwd=checkout, env=_ports(tmp_path, checkout, result), capture_output=True, text=True, timeout=30,
+        cwd=checkout, env=_ports(tmp_path, checkout, result), capture_output=True, text=True, timeout=30, check=False,
     )
     assert cp.returncode == expected, cp.stdout + cp.stderr
     if expected:
