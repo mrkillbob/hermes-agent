@@ -20,7 +20,7 @@ OS_TESTS = (
 
 
 def policy_scopes(repository: str, release: bool, ref_type: str) -> dict[str, str]:
-    advisory = repository == "mrkillbob/hermes-agent" and not release and ref_type == "branch"
+    advisory = repository == "Coding-Sensations/hermes-agent" and not release and ref_type == "branch"
     return {
         "os_tests_scope": "macos" if advisory else "all",
         "bootstrap_tests_scope": "posix" if advisory else "all",

@@ -862,16 +862,16 @@ def test_pull_requests_and_main_pushes_never_run_e2e(event_name):
 
 @pytest.mark.parametrize("repository,release,event_name", [
     ("NousResearch/hermes-agent", False, "workflow_dispatch"),
-    ("mrkillbob/hermes-agent", False, "pull_request"),
-    ("mrkillbob/hermes-agent", False, "workflow_dispatch"),
-    ("mrkillbob/hermes-agent", True, "workflow_dispatch"),
+    ("Coding-Sensations/hermes-agent", False, "pull_request"),
+    ("Coding-Sensations/hermes-agent", False, "workflow_dispatch"),
+    ("Coding-Sensations/hermes-agent", True, "workflow_dispatch"),
 ])
 def test_native_policy_keeps_complete_selection_and_strict_acceptance(repository, release, event_name):
     """Advisory fork branches retain the native journeys; a release requires them."""
     strict = "upd-txn" if event_name == "workflow_dispatch" else ""
     run = _ci_run(cc.classify([]), repository=repository, event_name=event_name,
                   inputs={"release": release, "strict_acceptance": strict})
-    advisory = repository == "mrkillbob/hermes-agent" and not release
+    advisory = repository == "Coding-Sensations/hermes-agent" and not release
     caller = "tests-windows-advisory" if advisory else "tests-os"
     required = _yaml(".github/workflows/ci.yaml")["jobs"]["all-checks-pass"]["needs"]
     assert (caller in required) == (not advisory), f"wrong merge-gate authority for {caller}"
@@ -892,7 +892,7 @@ def test_native_policy_keeps_complete_selection_and_strict_acceptance(repository
 @pytest.mark.parametrize("path", ["agent/memory_provider.py", "apps/desktop/electron/update-marker.ts"])
 def test_fork_owner_change_reaches_advisory_windows_consumers(path):
     lanes = _real_classifier([path])
-    run = _ci_run(lanes, repository="mrkillbob/hermes-agent")
+    run = _ci_run(lanes, repository="Coding-Sensations/hermes-agent")
     assert "tests-windows-advisory" in run
     for lane in ("desktop_updater", "e2e", "e2e_upgrade", "e2e_desktop_update"):
         if lanes[lane]:
