@@ -32,6 +32,27 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), OpenR
 
 ---
 
+## About this fork
+
+This repository is an **unofficial fork** of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent), maintained at [Coding-Sensations/hermes-agent](https://github.com/Coding-Sensations/hermes-agent). Hermes Agent is the work of Nous Research and its contributors; this fork keeps the MIT license and tracks upstream through periodic sync pull requests. It is not an official Nous Research release, so use upstream for the stock experience and the documentation links above.
+
+The fork exists to run Hermes as an unattended, multi-profile work system on a small set of local machines, and the additions below follow from that. Each links to the developer guide where one exists.
+
+| Area | What this fork adds |
+|---|---|
+| **Kanban as an evidence-backed work queue** | Read-only board inspection and census that never initialise or modify a store ([guide](website/docs/developer-guide/kanban-readonly-inspection.md)); digest-bound artifact and source acceptance that records "accepted, execution still restricted" separately from running a card ([guide](website/docs/developer-guide/kanban-artifact-acceptance.md)); project/board binding, task revisions, idempotent enqueue serialised with creation, and exact-card dispatch windows; guarded orphan-run recovery ([doc](docs/kanban-orphan-recovery.md)). |
+| **Safe unattended operation** | An ESTOP pause that gates cron and dispatch, startup writer holds with custody records, a prospective reboot checkpoint for closing legacy writer holds ([guide](website/docs/developer-guide/startup-writer-reboot-recovery.md)), gateway drain on shutdown and update, and diagnostics that tell a busy lock from a malformed record. |
+| **Managed local inference** | A local runtime layer for Hermes-managed llama.cpp models with generation evidence, router reconciliation ([guide](website/docs/developer-guide/local-router-reconciliation.md)), per-model and per-profile concurrency caps, and routing that keeps an explicit local pin local. |
+| **Automation producers** | Cron job producers that enqueue Kanban work through the normal API (for example the dependency-health producer), and a GitHub PR-feedback plugin ([source](plugins/github-pr-feedback)). |
+| **Desktop and fleet** | A Kanban board plugin and fleet status in the Desktop app, plus fleet claim recovery ([guide](website/docs/developer-guide/fleet-claim-recovery.md)). |
+| **Fork CI policy** | Hosted-runner CI tuned for a fork: per-workload cancellation, serial network-upgrade tests, and Windows native lanes that are advisory on branch pushes and pull requests but still required for releases and tags. |
+
+Local setup for contributors is in [fork-local-environment](website/docs/developer-guide/fork-local-environment.md). This repository also holds project material that is not part of the agent, such as `docs/lunar-city`.
+
+Fixes that are useful to everyone belong upstream; we send them there when they apply cleanly to stock Hermes.
+
+---
+
 ## Quick Install
 
 ### Linux, macOS, WSL2
