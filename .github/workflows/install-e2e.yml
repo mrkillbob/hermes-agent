@@ -282,7 +282,7 @@ jobs:
     # Bundled legs need dispatch-only manifests; a PR never runs them.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     outputs:
       windows: ${{ steps.inputs.outputs.windows }}
       macos: ${{ steps.inputs.outputs.macos }}
@@ -296,7 +296,9 @@ jobs:
         uses: ./.github/actions/setup-pm
         with:
           toolchain: node
+          cache: false
           cache-python: false
+          cache-node: false
       - id: inputs
         env:
           BUNDLE_WINDOWS_MANIFEST: ${{ inputs.windows-bundle-manifest }}

@@ -273,6 +273,22 @@ def _quiet_wait(pred, *, timeout: float, what: str, interval: float = 1.0):
         return None
 
 
+def _require_update_premise(satisfied: bool, pending, inst: X.Install, message: str) -> None:
+    """Keep the fenced timing premise, with the completed updater's actual outcome."""
+    if satisfied:
+        return
+    # result() is read only after done(); never block a live update for diagnostics.
+    completed = pending.result() if pending.done() else None
+    try:
+        detail = inst.diagnostics(completed)
+    except Exception as exc:
+        # Evidence collection must not replace the failed timing premise.
+        detail = f"handoff diagnostics failed: {type(exc).__name__}: {exc}"
+        if completed is not None:
+            detail = f"{H.describe(completed, 8000)}\n{detail}"
+    raise AssertionError(f"{message}\n{detail}")
+
+
 # -- the scenario ---------------------------------------------------------------------------------
 
 
@@ -325,12 +341,18 @@ def run(column: str, root: Path) -> SimpleNamespace:
                     marker = inst.hermes_home / ".hermes-update-in-progress"
                     X.wait_for(lambda: marker.exists() or pending.done(), timeout=60,
                                what="the update to acquire its live marker")
-                    assert marker.exists(), "premise: the update exited before entering its fenced phase"
+                    _require_update_premise(
+                        marker.exists(), pending, inst,
+                        "premise: the update exited before entering its fenced phase",
+                    )
                     assert dt.datetime.now(dt.UTC) < due and not model.cron_calls, (
                         "premise: the cron instant arrived before the update held the checkout")
                     X.wait_for(lambda: dt.datetime.now(dt.UTC) > due + dt.timedelta(seconds=5),
                                timeout=90, what="the cron instant during the update")
-                    assert not pending.done(), "premise: the update finished before the cron instant"
+                    _require_update_premise(
+                        not pending.done(), pending, inst,
+                        "premise: the update finished before the cron instant",
+                    )
                 finally:
                     model.release.set()
                 o.up = pending.result()

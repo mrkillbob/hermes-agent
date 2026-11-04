@@ -16,7 +16,8 @@ def catalogs(monkeypatch):
     toolset = "mcp-editor_fixture"
     names = [f"mcp__editor_fixture__{name}" for name in ("ack", "policy", "read", "submit")]
     authority = SimpleNamespace(profile_id="fixture-profile-a", runner=SimpleNamespace(),
-                                sessions={}, agent=lambda ref: None)
+                                sessions={}, agent=lambda ref: None,
+                                db=SimpleNamespace(get_session=lambda sid: None))
     scope = session_local_mcp.session_scope(authority, "first")
     schemas = {}
     for name in names:
@@ -85,7 +86,8 @@ async def test_observers_show_only_registered_matching_frozen_session(catalogs, 
     assert await c.read(surface, c.authority, "first", frozen) == sorted(c.names)
     assert frozen.editor_mcp_json == manifest
     assert await c.read(surface, c.authority, "second", c.policy(c.authority, "second")) == []
-    other = SimpleNamespace(profile_id="fixture-profile-b", runner=SimpleNamespace(), sessions={}, agent=lambda ref: None)
+    other = SimpleNamespace(profile_id="fixture-profile-b", runner=SimpleNamespace(), sessions={}, agent=lambda ref: None,
+                      db=SimpleNamespace(get_session=lambda sid: None))
     assert await c.read(surface, other, "first", c.policy(other, "first")) == []
     # A caller's unrelated ambient overlay must not contaminate an ordinary session.
     with session_tool_scope(c.scope):
@@ -160,7 +162,7 @@ async def test_inventory_catalog_overlay_does_not_hide_owning_profile_health(cat
                             scope=c.scope)
     owner = c.authority if profile == "a" else SimpleNamespace(
         profile_id=str(homes["b"]), runner=SimpleNamespace(config=SimpleNamespace(multiplex_profiles=True)),
-        sessions={}, agent=lambda ref: None)
+        sessions={}, agent=lambda ref: None, db=SimpleNamespace(get_session=lambda sid: None))
     frozen = c.policy(owner, sid)
     owner.sessions[sid] = SimpleNamespace(source=SimpleNamespace(policy=frozen))
     home_token = set_hermes_home_override(homes[profile])

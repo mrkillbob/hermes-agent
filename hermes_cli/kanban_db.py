@@ -3860,12 +3860,6 @@ def block_task(
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
         blocked_task = get_task(conn, task_id)
-        if kind == "dependency":
-            _fire_task_hook(
-                "kanban_task_blocked", blocked_task, task_id, run_id,
-                conn=conn, reason=reason,
-            )
-            return True
     _fire_task_hook(
         "kanban_task_blocked", blocked_task, task_id, run_id, conn=conn, reason=reason,
     )

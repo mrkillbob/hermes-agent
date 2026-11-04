@@ -125,7 +125,7 @@ class Install:
         parts = []
         if cp is not None:
             parts.append(H.describe(cp, 8000))
-        for log in self.logs:
+        for log in [*self.logs, self.root / "ns-agent.stderr"]:
             if log.exists():
                 parts.append(f"--- {log.name} (tail) ---\n{log.read_text(errors='replace')[-3000:]}")
         logs = self.hermes_home / "logs"

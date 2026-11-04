@@ -16,8 +16,6 @@ def rotate_runtime_main_api_key(old: Any, new: Any) -> None:
     """
     from agent.auxiliary_client import _RUNTIME_MAIN_CONTEXT, _explicit_api_key_value
 
-    # The legacy mirrors are left alone: _compat_runtime_main() ignores them while they equal the compat
-    # snapshot, and republishing from here cannot tell which runtime published them.
     runtime = _RUNTIME_MAIN_CONTEXT.get()
     if isinstance(runtime, dict) and runtime.get("api_key") == old:
         runtime["api_key"] = _explicit_api_key_value(new) if isinstance(new, str) or callable(new) else ""

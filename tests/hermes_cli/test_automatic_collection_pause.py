@@ -91,7 +91,7 @@ def test_paused_collection_needs_no_installed_dependencies(tmp_path, sparse):
         copied = tmp_path / "source"
         for folder, names in {
             "agent": ("__init__.py", "jiter_preload.py", "estop.py", "file_safety.py"),
-            "hermes_cli": ("__init__.py", "venv_sync.py", "steward.py"),
+            "hermes_cli": ("__init__.py", "venv_sync.py", "steward.py", "home_data_layout.py"),
         }.items():
             (copied / folder).mkdir(parents=True)
             for name in names:
