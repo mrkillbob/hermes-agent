@@ -159,11 +159,7 @@ class Model:
         for job in self.active():
             if job.trigger:
                 job.trigger = False
-                self.fires.append((job.name, None, t))
-                # A run-now is extra while its scheduled slot is still future.
-                if job.pending is None or job.pending <= t:
-                    job.fired += 1
-                    job.advance_from(t)
+                self.manual(job.name, t)
                 continue
             if job.pending is None or job.pending > t:
                 continue
@@ -175,6 +171,8 @@ class Model:
             job.advance_from(t)
 
     def manual(self, name: str, t: float) -> None:
+        """A run-now ahead of the pending slot is an EXTRA fire: the slot and the repeat budget stay
+        put (cron/extra_fire.py, f656543e030). Once the slot is due it IS the scheduled fire."""
         job = self.jobs[name]
         self.fires.append((name, None, t))
         if job.pending is None or job.pending <= t:
