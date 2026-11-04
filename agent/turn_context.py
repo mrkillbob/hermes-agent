@@ -1198,7 +1198,8 @@ def build_turn_context(
     )
     _reset_per_turn_agent_state(agent)
 
-    _preview_text = summarize_user_message_for_log(user_message)
+    from agent.diagnostic_reference_policy import preview_for_log
+    _preview_text = preview_for_log(agent, user_message, summarize_user_message_for_log)
     _msg_preview = _preview_text[:80] + ("..." if len(_preview_text) > 80 else "")
     _turn_fmt = (
         "conversation turn: session=%s model=%s provider=%s platform=%s history=%d msg=%r"

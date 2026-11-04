@@ -62,6 +62,7 @@ class _Decision:
     delivery_generation: int | None = None
     observation: object = None
     admission: object = None
+    execution: object = None
 
 
 class LearningBroker:
@@ -146,6 +147,9 @@ class LearningBroker:
             now = time.monotonic()
             retained = {}
             for key, value in self._decisions.items():
+                if now >= value.expires_at:
+                    from gateway.session_learning_cache import retire_preparation
+                    retire_preparation(value)
                 if now < value.expires_at or value.admission is not None:
                     retained[key] = value
                     if now >= value.expires_at:
@@ -180,6 +184,8 @@ class LearningBroker:
             _deny()
         if time.monotonic() >= selected.expires_at:
             selected.status = 'expired'
+            from gateway.session_learning_cache import retire_preparation
+            retire_preparation(selected)
             _deny()
         if selected.status in {'revoked', 'expired', 'refused', 'uncertain'}:
             _deny()
@@ -188,6 +194,8 @@ class LearningBroker:
     def _unchanged(self, selected):
         if time.monotonic() >= selected.expires_at:
             selected.status = 'expired'
+            from gateway.session_learning_cache import retire_preparation
+            retire_preparation(selected)
             _deny()
         ref = SessionRef(selected.fence.profile_id, selected.fence.logical_session_id)
         live, fence = self._fence(selected.connection, ref)
@@ -218,8 +226,13 @@ class LearningBroker:
             self._native_live(connection, ref, admission=False)
             selected.status = 'revoked'
             selected.reference = None
+            from gateway.session_learning_cache import retire_preparation
+            retire_preparation(selected)
             if selected.admission is not None and selected.admission.active:
                 _deny('reference_commit_busy')
+            if (selected.execution is not None and selected.execution.native_send is not None
+                    and selected.execution.native_send.state == 'active'):
+                _deny('reference_execution_busy')
 
     async def revoke_and_wait(self, connection, *, decision_id, request_id):
         """Complete record revocation without blocking the owner loop on a commit."""
@@ -230,6 +243,13 @@ class LearningBroker:
         """HOST ONLY: metadata admission, not a registered delivery/model operation."""
         from gateway.session_learning_admission import admit
         return await admit(self, connection, decision_id, request_id)
+
+    def prepare_execution(self, connection, *, decision_id, request_id, conversation_history,
+                          destination, model):
+        """Separate HOST-only local-consumption consent, before metadata admission."""
+        from gateway.session_learning_execution import prepare_execution
+        return prepare_execution(self, connection, decision_id, request_id,
+            conversation_history=conversation_history, destination=destination, model=model)
 
     async def admission_receipt(self, connection, *, decision_id, request_id):
         """Read the original durable metadata row; never infer session use."""

@@ -303,15 +303,17 @@ class SessionAuthority:
         *sid*'s own mount moves onto the route: a detached one comes back, a local one ``/handoff``
         took over or one another chat held (a cross-chat ``/resume``) follows it, so its open viewers'
         turns and Stops reach the chat that holds it now (#143286)."""
-        from gateway.session_detached import detach, forget_detached
-        for other_sid, other in self.sessions.items():
-            if other.route == route and other_sid != sid:
-                detach(self, other, other_sid)
-        if (live := self.sessions.get(sid)) is not None and live.route != route:
-            left = live.route if live.detached else None
-            live.source, live.route = source, route
-            if left is not None:
-                forget_detached(self, left)
+        from gateway.session_learning_mutations import route_change
+        with route_change(self, route, sid):
+            from gateway.session_detached import detach, forget_detached
+            for other_sid, other in self.sessions.items():
+                if other.route == route and other_sid != sid:
+                    detach(self, other, other_sid)
+            if (live := self.sessions.get(sid)) is not None and live.route != route:
+                left = live.route if live.detached else None
+                live.source, live.route = source, route
+                if left is not None:
+                    forget_detached(self, left)
 
     def agent(self, ref):
         from gateway.session_detached import running_key
@@ -409,17 +411,26 @@ class SessionAuthority:
     def _retire_overflowed(self, session_id, transport):
         """The fanout dropped this peer's backlog: its subscription is over even though the
         socket still answers RPCs. A later resume re-attaches it with a fresh snapshot."""
-        live = self.sessions[session_id]
-        for subscription, member in list(live.subscribers.items()):
-            if self.events.get(member.transport_id) is transport:
-                del live.subscribers[subscription]
+        from gateway.session_learning_mutations import reference_change
+        with reference_change(self, {session_id}, transport=transport):
+            live = self.sessions[session_id]
+            for subscription, member in list(live.subscribers.items()):
+                if self.events.get(member.transport_id) is transport:
+                    del live.subscribers[subscription]
 
     async def detach(self, actor, subscription_id, *, end_reason=None, orphaned=False):
-        for session_id, live in self.sessions.items():
+        for session_id, live in list(self.sessions.items()):
             if subscription_id in live.subscribers:
-                if live.subscribers[subscription_id] != actor:
+                member = live.subscribers[subscription_id]
+                if member != actor:
                     raise RuntimeStoreError('permission_denied')
-                del live.subscribers[subscription_id]
+                from gateway.session_learning_mutations import retire_membership
+                await retire_membership(self, session_id, member)
+                if self.sessions.get(session_id) is not live or live.subscribers.get(subscription_id) is not member:
+                    raise RuntimeStoreError('stale_generation')
+                from gateway.session_learning_mutations import reference_change
+                with reference_change(self, {session_id}, actor=member):
+                    del live.subscribers[subscription_id]
                 transport = self.events.get(actor.transport_id)
                 if transport is not None:
                     live.event_stream.fanout.detach(transport)
@@ -575,7 +586,9 @@ class SessionAuthority:
     def fence_route(self, route):
         """/stop and /new: the route's messaging input still capturing or waiting, and a slash command's
         turn read before it (``_stop_epoch``), never commit."""
-        self._route_epochs[route] = self.route_epoch(route) + 1
+        from gateway.session_learning_mutations import route_change
+        with route_change(self, route):
+            self._route_epochs[route] = self.route_epoch(route) + 1
 
     async def _admit_native(self, event, fence=None):
         import json
@@ -1078,10 +1091,8 @@ class SessionAuthority:
                 raise RuntimeStoreError('unknown_execution')
             first = next((row for row in pending if row['status'] == 'queued'), None)
             if first is not None and 'curated_reference_v1' in first['payload']:
-                # No qualified consumed-context executor exists. Never turn lost or
-                # restarted reference metadata into an ordinary prompt/model call.
-                await self._refuse_head(ref, first['admission_id'], 'reference_delivery_unavailable')
-                return False, first
+                from gateway.session_learning_execution import claim_or_refuse
+                return await claim_or_refuse(self, ref, live, first), first
             from gateway.config import Platform
             if live.source.platform == Platform.LOCAL:
                 # A reasoning command or a model pick made while the previous turn ran lands here, at the
@@ -1277,6 +1288,7 @@ class SessionAuthority:
         the FIFO and re-raises ManagedExecutionUnknown."""
         from gateway.session_finite import execute_finite_admission
         from gateway.session_managed_worker import ManagedExecutionUnknown
+        from gateway.session_learning_consumer import ReferenceExecutionUnknown
         review = getattr(live.review, '_background_review_run', None)
         if review is not None and not review.request_done.is_set():
             # A cold /refine's review shares the session id, as the resident agent's does: cancel it
@@ -1285,6 +1297,9 @@ class SessionAuthority:
             await asyncio.to_thread(cancel_background_review_for_live_turn, live.review)
         try:
             try:
+                if 'curated_reference_v1' in row['payload']:
+                    from gateway.session_learning_consumer import execute_reference
+                    return await execute_reference(self, ref, row), 'completed'
                 return await execute_finite_admission(self, ref, row), 'completed'
             finally:
                 with live.event_stream.lock:
@@ -1303,13 +1318,16 @@ class SessionAuthority:
                 return None, 'settled_unknown'
             self._pause(ref, 'unknown_execution')
             raise
+        except ReferenceExecutionUnknown:
+            self._pause(ref, 'unknown_execution')
+            raise
         except Exception:
             import logging
             logging.getLogger(__name__).exception('Admitted turn %s failed', row['admission_id'])
             return 'The admitted turn failed.', 'failed'
 
     async def _drain(self, ref):
-        from gateway.session_managed_worker import ManagedExecutionUnknown
+        from gateway.session_learning_consumer import execution_unknown
         live = self.sessions[ref.session_id]
         while True:
             claimed = await self._claim_with_retry(ref, live)
@@ -1353,7 +1371,7 @@ class SessionAuthority:
                 self.deferred_resets.pop(live.route, None)
                 from gateway.session_ingress import fire_post_delivery
                 await fire_post_delivery(self, admission_id)  # cancelled mid-turn: as an adapter task's finally
-                if isinstance(exc, ManagedExecutionUnknown):
+                if execution_unknown(exc):
                     return
                 raise
             settled = None

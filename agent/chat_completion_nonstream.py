@@ -12,6 +12,10 @@ class _NonStreamRequest:
     """
 
     def __init__(self, agent, api_kwargs: dict):
+        from agent.native_send_worker import capture_native_send
+        self.native_send = capture_native_send(agent)  # pin before creating the physical thread
+        from agent.reference_input_witness import capture_reference_input
+        self.reference_input = capture_reference_input(agent, self.native_send)
         self.agent = agent
         self.api_kwargs = api_kwargs
         self.result = {"response": None, "error": None}
@@ -62,9 +66,31 @@ class _NonStreamRequest:
             client = self.agent._create_request_anthropic_client(reason=reason)
         else:
             client = self.agent._create_request_openai_client(reason=reason, api_kwargs=self.api_kwargs)
-        return self.clients.set_client(client, kind=kind)
+        client = self.clients.set_client(client, kind=kind)
+        from agent.native_send_worker import validate_send_client
+        validate_send_client(self.native_send, client, self.api_kwargs)
+        from agent.reference_input_witness import install_private_client
+        install_private_client(self.reference_input, client)
+        return client
 
     def _call(self):
+        if self.native_send is None:
+            return self._call_body()
+        from agent.local_text_policy import LocalTextRestriction
+        try:
+            from agent.reference_input_witness import reference_worker_scope
+            with self.native_send.hold(), reference_worker_scope(self.reference_input):
+                self._call_body()  # includes request-client cleanup before hold release
+                if self.result['error'] is not None:
+                    raise self.result['error']
+                if self.result['response'] is None:
+                    raise LocalTextRestriction('native_send_outcome_unknown')
+        except BaseException as error:  # health: allow BLE001 -- Hand worker failures and control exceptions to the poller; private failures stay terminal.
+            self.result['response'] = None
+            self.result['error'] = (error if not isinstance(error, Exception) or isinstance(error, InterruptedError)
+                                    else LocalTextRestriction('native_send_failed'))
+
+    def _call_body(self):
         watchdog_state_var = watchdog_context_token = None
         try:
             self._install_codex_request_token()
@@ -75,7 +101,9 @@ class _NonStreamRequest:
                 watchdog_context_token = watchdog_state_var.set(self.codex_watchdog_state)
             self.result["response"] = h._dispatch_nonstreaming_api_request(
                 self.agent, self.api_kwargs, make_client=self._make_client)
-        except Exception as e:
+            from agent.reference_input_witness import observe_private_response
+            observe_private_response(self.reference_input, self.result['response'])
+        except Exception as e:  # health: allow BLE001 -- Store SDK errors for caller-thread propagation after cleanup, preserving cancellation and retirement handling.
             # Our own force-close caused this error: swallow it, the main
             # thread raises InterruptedError (#6600). Retirement logs at info
             # (a watchdog discarded output the provider already sent — what an
@@ -99,7 +127,8 @@ class _NonStreamRequest:
             # Reuse reason only on a clean response; error or cancel-swallow
             # really closes so the next attempt builds a fresh pool.
             self.clients.close_once(
-                "request_complete" if self.result["response"] is not None else "request_error_cleanup")
+                "private_reference_cleanup" if self.reference_input is not None else
+                ("request_complete" if self.result["response"] is not None else "request_error_cleanup"))
 
     def _abort_request(self, reason: str) -> None:
         """Watchdog/interrupt kill: abort the request client (kind-aware, #67142)

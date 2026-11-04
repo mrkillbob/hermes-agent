@@ -60,6 +60,10 @@ def handle_api_error(
     """Recover from ``api_error`` in the original order. Every fallback activation must leave
     the retry loop with ``restart_with_rebuilt_messages`` armed (``"break"``) so the pre-API
     preflight re-runs against the fallback's context window (#84733)."""
+    from agent.diagnostic_reference_policy import retained_policy
+    from agent.local_text_policy import LocalTextRestriction
+    if retained_policy(agent) is not None and isinstance(api_error, LocalTextRestriction):
+        raise api_error  # policy refusal is terminal; never retry or choose another route
     _provider_overflow_recovery_pending = False
 
     def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> ApiErrorVerdict:

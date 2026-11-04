@@ -91,6 +91,7 @@ async def test_new_turn_cancels_the_cold_refine_review(monkeypatch):
     threads = _stub_refine(monkeypatch, refine, live, sid, review)
 
     async def turn(authority, ref, row):
+        assert row['payload']['text'] == 'next turn'
         outcome['turn_saw_review_done'] = started[0].request_done.is_set()
         return 'ok'
     monkeypatch.setattr(session_finite, 'execute_finite_admission', turn)
@@ -98,7 +99,8 @@ async def test_new_turn_cancels_the_cold_refine_review(monkeypatch):
         await refine.refine_local_session(object(), live.source, None)
         wait_until(lambda: started, what='the review started')
         owner = SimpleNamespace(executing={})
-        result = await SessionAuthority._execute_claimed(owner, SessionRef('p', sid), live, {'admission_id': 'a'})
+        result = await SessionAuthority._execute_claimed(owner, SessionRef('p', sid), live,
+            {'admission_id': 'a', 'payload': {'text': 'next turn'}})
     finally:
         for thread in threads:
             thread.join(10)
