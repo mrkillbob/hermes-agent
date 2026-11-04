@@ -75,9 +75,12 @@ class RuntimeSessionLifecycleMixin:
             payload['display_metadata'] = display_metadata
         return self._apply('session.message_api_content', payload)['value']
 
-    def set_user_message_content(self, session_id, row_id, content):
+    def set_user_message_content(self, session_id, row_id, content, display_metadata=None):
         self._session(session_id)
-        return self._apply('session.user_content', {'row_id': row_id, 'content': content})['value']
+        payload = {'row_id': row_id, 'content': content}
+        if display_metadata is not None:
+            payload['display_metadata'] = display_metadata
+        return self._apply('session.user_content', payload)['value']
 
     def compare_and_set_user_message_projection(self, session_id, row_id, *, expected_content,
                                                 expected_api_content, content, api_content):

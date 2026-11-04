@@ -23,7 +23,8 @@ import threading
 import time
 
 _OUT = threading.Lock()
-_CHILDREN: dict[int, subprocess.Popen] = {}
+_CHILDREN: dict[int, tuple[subprocess.Popen, str]] = {}
+_CHILDREN_LOCK = threading.Lock()
 
 
 def _reply(rid, **payload) -> None:
@@ -72,9 +73,19 @@ def _procs() -> list[dict]:
 
 
 def _reap() -> None:
-    for pid, proc in list(_CHILDREN.items()):
-        if proc.poll() is not None:
+    with _CHILDREN_LOCK:
+        for pid, (proc, log_path) in list(_CHILDREN.items()):
+            returncode = proc.poll()
+            if returncode is None:
+                continue
             _CHILDREN.pop(pid, None)
+            evidence = json.dumps({"pid": pid, "returncode": returncode})
+            try:
+                with open(log_path, "a", encoding="utf-8") as log:
+                    log.write(f"\n[handoff child exit] {evidence}\n")
+            except OSError as exc:
+                # Keep the outcome observable even if the cell log cannot be appended.
+                print(f"handoff child exit {evidence}: could not append log: {exc}", file=sys.stderr)
 
 
 def _reaper_loop() -> None:
@@ -112,7 +123,8 @@ def _spawn(req: dict) -> dict:
                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     finally:
         log.close()
-    _CHILDREN[proc.pid] = proc
+    with _CHILDREN_LOCK:
+        _CHILDREN[proc.pid] = (proc, req["log"])
     return {"pid": proc.pid}
 
 

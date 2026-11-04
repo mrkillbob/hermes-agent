@@ -13,7 +13,7 @@ import { resolveDesktopHermesHome } from '../../../apps/desktop/electron/data-pa
 import { applyBundleEnvironment } from '../../../apps/desktop/scripts/bundle-env.mjs'
 import { type ChatIdentity, readChatIdentity, runDesktopChatSmoke, waitForChatReady } from '../../../tests-js/scripts/desktop-chat-smoke.ts'
 import { beginSelectionCapture, type SelectionCapture } from '../../../tests-js/scripts/desktop-selection-diagnostics.ts'
-import { assertBackendOrigin, localBackendProcess, readBundledBundleEnv, readInstallationCommit } from '../../../tests-js/scripts/desktop-smoke-process.ts'
+import { assertBackendOrigin, localBackendProcess, readBundledBundleEnv, readInstallationCommit, reusedDesktopBuildCommit } from '../../../tests-js/scripts/desktop-smoke-process.ts'
 import { validateMockUrl, writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config.ts'
 import { type MockServer, startMockServer } from '../../../tests-js/scripts/mock-server.ts'
 
@@ -356,7 +356,8 @@ export async function runInstalledDesktopSmoke(options: SmokeOptions, launchApp:
     if (provenanceCommit !== options['expect-commit']) { throw new Error('Installed commit differs from --expect-commit') }
     // Trace only chat actions. Connection probes can return credential-bearing logs.
     await app.context().tracing.start({ screenshots: true, snapshots: false, sources: false })
-    const chat = await runDesktopChatSmoke(page, { mockUrl, phase: options.phase, outDir: out, expectCommit: options['expect-commit'], provenanceCommit, selectionCapture })
+    const reusedBuildCommit = reusedDesktopBuildCommit(options.root, options.origin, provenanceCommit)
+    const chat = await runDesktopChatSmoke(page, { mockUrl, phase: options.phase, outDir: out, expectCommit: options['expect-commit'], provenanceCommit, reusedBuildCommit, selectionCapture })
     fs.writeFileSync(receiptPath, `${JSON.stringify({ ...chat, status: 'closing' }, null, 2)}\n`)
     const result = { ...chat, origin: options.origin, root: options.root, executable: options.exe, running, predictedHome,
       localModeConfigured: true, backend: { ...backend, command: redact(backend.command) }, launchKind: options.phase === 'new' ? 'post-update-launch' : 'installed-launch' }

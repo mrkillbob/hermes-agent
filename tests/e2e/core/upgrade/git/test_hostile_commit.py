@@ -69,8 +69,8 @@ def provider():
 
 
 @pytest.fixture()
-def world(tmp_path_factory, provider):
-    root = tmp_path_factory.mktemp("hostile-commit")
+def world(upgrade_case_root, provider):
+    root = upgrade_case_root
     sb, origin = P.install_head(root)
     P.configure(sb, provider.base_url)
     shim = sb.root / "wrap" / "git"

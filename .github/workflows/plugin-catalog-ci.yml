@@ -18,6 +18,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same PR supersedes the run in flight.
+concurrency:
+  group: plugin-catalog-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   structural:
     runs-on: ubuntu-latest

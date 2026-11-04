@@ -81,6 +81,7 @@ import {
   $profileColors,
   $profiles,
   $profileScope,
+  type AgentProfileRoute,
   ALL_PROFILES,
   messagingTotalsKey,
   normalizeProfileKey,
@@ -162,6 +163,7 @@ import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
 import { filterToSessionBearingProjects, resolveLiveProjectFilter } from './project-filter'
 import {
+  enteredProjectLiveRows,
   excludeProjectSessions,
   orderProjectsByIds,
   overlayLiveLanes,
@@ -170,7 +172,6 @@ import {
   ProjectBackRow,
   ProjectMenu,
   projectTreeCwd,
-  reconcileEnteredProjectSessions,
   sessionBucketId,
   sessionMatchesProjectFilter,
   sessionRecency as sessionTime,
@@ -178,6 +179,7 @@ import {
   type SidebarWorkspaceTree,
   sortProjectsForOverview,
   StartWorkButton,
+  useGatewayProjectTree,
   useRepoWorktreeMap
 } from './projects'
 import { WorktreeDialog } from './projects/worktree-dialog'
@@ -389,7 +391,7 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onDeleteSession: (sessionId: string) => void
   onArchiveSession: (sessionId: string) => void
   onBranchSession: (sessionId: string) => void
-  onNewSessionInWorkspace: (path: null | string) => void
+  onNewSessionInWorkspace: (path: null | string, owner?: AgentProfileRoute) => void
   /** Create a brand-new session and open it as a tile. `dir` is the dock edge
    *  (or `center` to stack a tab); `anchor`/`before` optionally pin it to a
    *  specific zone / tab-strip slot, and `cwd` pins it to a project's path —
@@ -783,11 +785,11 @@ export function ChatSidebar({
     }
   }, [agentOrderIds, agentOrderManual, unpinnedAgentSessions])
 
-  // Recents render in recency order. The hand-picked order is layered on per
-  // date group inside the section (orderRowsWithinGroups) rather than baked
-  // into the list here, so a drag ranks a row among its own day's chats
-  // instead of flattening the whole sidebar into an undated manual mode.
+  // Recents render in recency order. The hand-picked order is layered on per date group inside the
+  // section (orderRowsWithinGroups) rather than baked into the list here, so a drag ranks a row
+  // among its own day's chats instead of flattening the whole sidebar into an undated manual mode.
   const agentSessions = unpinnedAgentSessions
+  const { owners, ownerKey, tree: gatewayProjectTree } = useGatewayProjectTree(projectTree, agentSessions)
 
   // Recents are local-only: messaging-platform sessions are fetched as their
   // own slice ($messagingSessions) and rendered in self-managed per-platform
@@ -991,10 +993,10 @@ export function ChatSidebar({
   // `projects.tree` already unifies explicit projects + auto repos and folds
   // linked worktrees under their main repo. The desktop only layers local view
   // state on top: dismissed auto-projects, persisted repo/lane order, and the
-  // overview sort. Membership is the backend tree's — never re-derived here.
+  // overview sort. Membership is the backend tree's (plus other gateways' rows), never re-derived.
   const projectModel = useMemo<SidebarProjectTree[]>(() => {
     const sorted = sortProjectsForOverview(
-      filterToSessionBearingProjects(filterVisibleProjects(projectTree, dismissedAutoProjects))
+      filterToSessionBearingProjects(filterVisibleProjects(gatewayProjectTree, dismissedAutoProjects))
         // A filtered-out project drops its whole lane, header included — hiding
         // only its rows would leave a row of empty folders behind.
         .filter(project => !projectFilter.length || projectFilter.includes(project.id))
@@ -1013,11 +1015,7 @@ export function ChatSidebar({
       activeProjectId
     )
 
-    // Layer the user's manual drag-order on top of the deterministic sort. Empty
-    // (default) returns `sorted` untouched; projects the user hasn't ordered yet
-    // keep their sorted position rather than jumping the hand-picked list.
-    // Deduplicate by id — safety net for backend merge edge cases
-    // (e.g. Windows path-casing differences across profiles).
+    // Manual drag-order over the sorted list; dedupe by id (Windows path casing across profiles).
     const seen = new Set<string>()
 
     const deduped = sorted.filter(project => {
@@ -1032,7 +1030,7 @@ export function ChatSidebar({
 
     return orderProjectsByIds(deduped, projectOrderIds)
   }, [
-    projectTree,
+    gatewayProjectTree,
     dismissedAutoProjects,
     orderRepos,
     activeProjectId,
@@ -1096,8 +1094,8 @@ export function ChatSidebar({
   }, [overviewEnteredProject, enteredProjectTree, orderRepos, isHiddenFromProjects])
 
   const enteredProjectOverlaySessions = useMemo(
-    () => reconcileEnteredProjectSessions(agentSessions, overviewEnteredProject?.previewSessions),
-    [agentSessions, overviewEnteredProject?.previewSessions]
+    () => enteredProjectLiveRows(overviewEnteredProject, agentSessions, owners),
+    [agentSessions, overviewEnteredProject, owners]
   )
 
   // Overlay live `$sessions` onto the entered project so a just-created session
@@ -1110,9 +1108,9 @@ export function ChatSidebar({
   const enteredProjectContent = useMemo(
     () =>
       enteredProject
-        ? overlayLiveLanes(enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners)
+        ? overlayLiveLanes(enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners, ownerKey)
         : undefined,
-    [enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners]
+    [enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners, ownerKey]
   )
 
   const scopedRepoPaths = useMemo(
@@ -1123,7 +1121,7 @@ export function ChatSidebar({
 
   // git worktree list is a VISUAL-only enhancer (empty lanes); never membership.
   const inEnteredProject = Boolean(enteredProject && !showAllProfiles)
-  const [scopedRepoWorktrees] = useRepoWorktreeMap(scopedRepoPaths, inEnteredProject)
+  const [scopedRepoWorktrees] = useRepoWorktreeMap(scopedRepoPaths, inEnteredProject, enteredProject)
 
   // Re-probe worktree lanes on out-of-band git changes the renderer can't see.
   // A turn can `git worktree add/remove` in the terminal (e.g. you ask Hermes to
@@ -1218,13 +1216,14 @@ export function ChatSidebar({
         projects,
         showAllSessions ? Infinity : PROJECT_PREVIEW_COUNT,
         {
+          ownerKey,
           removed: removedSessionIds,
           // Rank before the trim, so "3 priciest in this project" isn't "3 most
           // recent, priciest first".
           rankIds: sortOrderIds
         }
       ),
-    [projectOverview, agentSessions, projects, removedSessionIds, sortOrderIds, showAllSessions]
+    [projectOverview, agentSessions, projects, removedSessionIds, sortOrderIds, showAllSessions, ownerKey]
   )
 
   // A row's "Show all" hydrates raw backend lanes, which — like the drill-in —
@@ -1771,7 +1770,7 @@ export function ChatSidebar({
                 card={cardRows}
                 contentClassName="flex flex-col gap-px rounded-lg pb-2 pt-1"
                 dndSensors={dndSensors}
-                emptyState={<SidebarPinnedEmptyState />}
+                emptyState={<SidebarPinnedEmptyState archived={showArchived} filtered={filtersNarrow} />}
                 label={s.pinned}
                 onArchiveSession={onArchiveSession}
                 onBranchSession={onBranchSession}
@@ -1880,7 +1879,7 @@ export function ChatSidebar({
                     )}
                     {inProject && enteredProject ? (
                       <div className="group/workspace flex shrink-0 items-center gap-0.5">
-                        {enteredProject.path && <StartWorkButton repoPath={enteredProject.path} />}
+                        {enteredProject.path && <StartWorkButton project={enteredProject} />}
                         {/* Home has no folder and no record to rename, theme, or delete. */}
                         {!enteredProject.isNoProject && (
                           <ProjectMenu
