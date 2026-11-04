@@ -150,7 +150,6 @@ import {
   resumeRouteStillCurrent,
   sessionContextDrift
 } from '../session-context-drift'
-import { clearLiveSegmentStart, liveSegmentStart } from '../use-message-stream/segment-identity'
 import { singleFlightSessionResume } from '../use-prompt-actions/single-flight-resume'
 
 import { branchThroughRowId } from './branch-boundary'
@@ -176,6 +175,7 @@ import {
   rereadPageAfterResumeBarrier
 } from './resume-barrier-reread'
 import { clearResumeLatches, clearResumeToasts, notifyResumeFailed, type ResumeAttemptOptions } from './resume-latches'
+import { type ResumeBaseline, resumeRuntimeBaseline } from './resume-live-coverage'
 import {
   ambientResumeConnectionId,
   openResumeGateway,
@@ -210,6 +210,7 @@ import {
   findListedSession,
   goneSessionVerdict,
   isSessionGoneError,
+  overlayAgainstResumeBaseline,
   overlayConcurrentMessageChanges,
   patchSessionWorkspace,
   preserveEquivalentTranscript,
@@ -219,7 +220,6 @@ import {
   resolveSessionProfile,
   resolveStoredSession,
   restoreListedSession,
-  type ResumeLiveCoverage,
   selectBranchMessages,
   sessionMatchesStoredId,
   sessionShouldHaveTranscript,
@@ -2015,8 +2015,7 @@ export function useSessionActions({
             ? null
             : getLatestSessionMessages(storedSessionId, sessionRestScope)
 
-        let resumeRuntimeBaselineMessages: ChatMessage[] = []
-        let resumeLiveCoverage: ResumeLiveCoverage | undefined
+        let resumeBaseline: ResumeBaseline = { messages: [] }
         const resumeStartedAt = Date.now() / 1000
 
         const resumePromise = singleFlightSessionResume(
@@ -2028,27 +2027,7 @@ export function useSessionActions({
             ),
           { requiresMessages: options?.authoritativeSnapshot, scope: sessionOwner }
         ).then(resumed => {
-          // A runtime first seen before this ACK already holds its pre-ACK live rows, so the
-          // ACK-time state cannot baseline them. With a first-segment start offset the snapshot's
-          // coverage decides what is new; without one, keep the ACK-time baseline.
-          const preAckStart = resumeRuntimeBaselines.has(resumed.session_id)
-            ? undefined
-            : liveSegmentStart(resumed.session_id)
-
-          // One ACK consumes the window's start; a later resume of this runtime must not reuse it.
-          clearLiveSegmentStart(resumed.session_id)
-
-          if (preAckStart?.segment === 1 && resumed.inflight) {
-            resumeRuntimeBaselineMessages = []
-            resumeLiveCoverage = {
-              liveStart: preAckStart.start,
-              snapshotEnd: resumed.inflight.assistant?.length ?? 0
-            }
-          } else {
-            resumeRuntimeBaselineMessages = resumeRuntimeBaselines.has(resumed.session_id)
-              ? resumeRuntimeBaselines.get(resumed.session_id)!
-              : sessionStateByRuntimeIdRef.current.get(resumed.session_id)?.messages ?? []
-          }
+          resumeBaseline = resumeRuntimeBaseline(resumed, resumeRuntimeBaselines, sessionStateByRuntimeIdRef.current)
 
           return resumed
         })
@@ -2191,13 +2170,12 @@ export function useSessionActions({
         })()
 
         const currentRuntimeMessages =
-          sessionStateByRuntimeIdRef.current.get(resumed.session_id)?.messages ?? resumeRuntimeBaselineMessages
+          sessionStateByRuntimeIdRef.current.get(resumed.session_id)?.messages ?? resumeBaseline.messages
 
-        const preferredWithRuntimeChanges = overlayConcurrentMessageChanges(
+        const preferredWithRuntimeChanges = overlayAgainstResumeBaseline(
           preferredMessages,
-          resumeRuntimeBaselineMessages,
-          currentRuntimeMessages,
-          resumeLiveCoverage
+          resumeBaseline,
+          currentRuntimeMessages
         )
 
         // #70449: same stale-snapshot guard as the warm path — a turn that

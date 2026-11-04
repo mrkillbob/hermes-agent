@@ -2,7 +2,7 @@
 import { resolveSessionRpcOwner } from '@/app/contrib/wiring-routing'
 import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-kinds'
 import { getSession } from '@/hermes'
-import { concatPartsByToolCall, sameAttachmentTurn, spliceOlderPreservedRows } from '@/lib/chat-messages'
+import { sameAttachmentTurn, spliceOlderPreservedRows } from '@/lib/chat-messages'
 import {
   assistantTextPart,
   type ChatMessage,
@@ -81,6 +81,7 @@ import {
   conflictingTranscriptIdentity,
   transcriptRowIds
 } from './pending-turn-identity'
+import { activationReplacement, type ResumeBaseline, type ResumeLiveCoverage } from './resume-live-coverage'
 import { reconcileOwnerApprovalMode } from './runtime-owner'
 import { publishSessionUsage } from './session-usage'
 
@@ -1419,39 +1420,6 @@ export function removeRepresentedLocalLiveProjection(
  * replace the older activation row; only rows added or changed since the warm
  * cache baseline are appended. This is identity-based, never text-based.
  */
-/**
- * Wire coverage for a runtime first seen before its resume ACK: the snapshot's
- * reply text ends at `snapshotEnd` and the pre-ACK live reply began at
- * `liveStart` (both UTF-16 offsets within the same segment). A live row that
- * starts at or after the snapshot's end is new; one that starts earlier
- * repeats the overlap, which the snapshot already carries.
- */
-export interface ResumeLiveCoverage {
-  liveStart: number
-  snapshotEnd: number
-}
-
-function dropLeadingText(parts: ChatMessage['parts'], count: number): ChatMessage['parts'] {
-  let left = count
-
-  return parts.flatMap(part => {
-    if (left <= 0 || part.type !== 'text') {
-      return [part]
-    }
-
-    if (part.text.length <= left) {
-      left -= part.text.length
-
-      return []
-    }
-
-    const kept = { ...part, text: part.text.slice(left) }
-    left = 0
-
-    return [kept]
-  })
-}
-
 export function overlayConcurrentMessageChanges(
   nextMessages: ChatMessage[],
   baselineMessages: ChatMessage[],
@@ -1576,16 +1544,7 @@ export function overlayConcurrentMessageChanges(
 
     if (activationStreamIndex >= 0 && current.role === 'assistant' && current.id.startsWith('assistant-stream-')) {
       const activationStream = overlaid[activationStreamIndex]
-      const activationText = chatMessageText(activationStream)
-      const currentText = chatMessageText(current)
-
-      const overlap = coverage ? Math.max(0, coverage.snapshotEnd - coverage.liveStart) : 0
-
-      const replacement = overlap
-        ? { ...current, parts: concatPartsByToolCall(activationStream.parts, dropLeadingText(current.parts, overlap)) }
-        : activationText && !currentText.startsWith(activationText)
-          ? { ...current, parts: concatPartsByToolCall(activationStream.parts, current.parts) }
-          : current
+      const replacement = activationReplacement(activationStream, current, coverage)
 
       nextIndexById.delete(activationStream.id)
       nextIndexById.set(current.id, activationStreamIndex)
@@ -1627,6 +1586,10 @@ export function overlayConcurrentMessageChanges(
 
   return changed ? overlaid : nextMessages
 }
+
+/** Overlay the runtime's changes since the resume baseline, with that baseline's snapshot coverage. */
+export const overlayAgainstResumeBaseline = (next: ChatMessage[], base: ResumeBaseline, current: ChatMessage[]) =>
+  overlayConcurrentMessageChanges(next, base.messages, current, base.coverage)
 
 export interface BranchMessage {
   content: string
