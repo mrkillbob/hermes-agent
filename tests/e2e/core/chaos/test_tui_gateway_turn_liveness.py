@@ -41,6 +41,7 @@ from typing import Any, Callable
 
 import pytest
 
+from tests.e2e.core.chaos._heartbeat_sampling import heartbeat_statistics
 from tests.e2e.core.chaos._helpers import (
     INTERRUPT_DEADLINE_S,
     LONG_TIMEOUT_S,
@@ -279,14 +280,13 @@ def _answered_turn(gw: TuiGatewayProcess, sid: str, nonce: str, what: str,
     return time.monotonic() - t0
 
 
-def _assert_heartbeat(scn: Scenario, hb: Heartbeat, stats: dict[str, Any], turn_s: float) -> None:
-    assert not hb.failures, f"{scn.id}: heartbeat RPC failed during the turn: {hb.failures}"
-    stats["heartbeat_max_s"] = round(max(hb.latencies, default=0.0), 3)
-    stats["heartbeats"] = len(hb.latencies)
-    assert stats["heartbeat_max_s"] < HEARTBEAT_MAX_S, (
-        f"{scn.id}: dispatcher blocked {stats['heartbeat_max_s']}s during the wedged turn")
-    assert len(hb.latencies) >= MIN_HEARTBEATS or turn_s < 2.0, (
-        f"{scn.id}: only {len(hb.latencies)} heartbeats answered in a {turn_s:.1f}s turn")
+def _assert_heartbeat(scn: Scenario, hb: Heartbeat, stats: dict[str, Any]) -> None:
+    samples, window = hb.sampling_snapshot()
+    stats.update(heartbeat_statistics(
+        scenario=scn.id, samples=samples, window=window,
+        latencies=tuple(hb.latencies), failures=tuple(hb.failures),
+        interval=HEARTBEAT_INTERVAL_S, minimum=MIN_HEARTBEATS, maximum_latency=HEARTBEAT_MAX_S,
+    ))
 
 
 class ToolOutlivedGateway(Exception):
@@ -300,7 +300,7 @@ def _exit_mid_turn(scn: Scenario, gw: TuiGatewayProcess, hb: Heartbeat, tag: str
                    state_db: Path, stored: str, stats: dict[str, Any]) -> dict[str, Any]:
     """The client vanishes (stdin EOF) or the supervisor stops us (SIGTERM) mid-wedge.
     Every other invariant is asserted first; the tool leftovers are checked together, last."""
-    _assert_heartbeat(scn, hb, stats, turn_s=LONG_TIMEOUT_S)
+    _assert_heartbeat(scn, hb, stats)
     t0 = time.monotonic()
     if scn.action == "sigterm":
         gw.proc.send_signal(signal.SIGTERM)
@@ -401,7 +401,7 @@ def run_scenario(scn: Scenario, srv: FakeLLMServer, root: Path) -> dict[str, Any
         stats["provider_calls"] = calls
         assert 1 <= calls <= MAX_PROVIDER_CALLS_PER_FAILED_TURN, f"{scn.id}: {calls} provider calls"
 
-        _assert_heartbeat(scn, hb, stats, turn_s)
+        _assert_heartbeat(scn, hb, stats)
 
         if scn.reaps_hung_tool:
             assert _wait_until(lambda: not _hung_tool_pids(tag), PROCESS_REAP_S), (

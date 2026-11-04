@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from tests.e2e.core.chaos._heartbeat_sampling import HeartbeatSample, ObservationWindow
 from tests.e2e.core.chaos._helpers import REPO_ROOT, python_exe
 
 
@@ -95,12 +96,17 @@ class TuiGatewayProcess:
             raise RpcError(f"{method} -> {frame['error']}")
         return frame["result"]
 
-    def timed_call(self, method: str, params: dict[str, Any] | None = None, *, timeout: float) -> float:
-        t0 = time.monotonic()
+    def call_timing(self, method: str, params: dict[str, Any] | None = None, *, timeout: float) -> tuple[float, float]:
+        started = time.monotonic()
         frame = self.wait_response(self.send(method, params), timeout)
+        finished = time.monotonic()
         if "error" in frame:
             raise RpcError(f"{method} -> {frame['error']}")
-        return time.monotonic() - t0
+        return started, finished
+
+    def timed_call(self, method: str, params: dict[str, Any] | None = None, *, timeout: float) -> float:
+        started, finished = self.call_timing(method, params, timeout=timeout)
+        return finished - started
 
     # ── events ─────────────────────────────────────────────────────────────
     def event_count(self) -> int:
@@ -179,6 +185,10 @@ class Heartbeat:
         self.interval, self.per_call_timeout = interval, per_call_timeout
         self.latencies: list[float] = []
         self.failures: list[str] = []
+        self._samples_lock = threading.Lock()
+        self._samples: list[HeartbeatSample] = []
+        self._observation_started: float | None = None
+        self._observation_finished: float | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="tui-heartbeat", daemon=True)
 
@@ -189,25 +199,40 @@ class Heartbeat:
             n += 1
             started = time.monotonic()
             self._inflight_since = started
+            with self._samples_lock:
+                sample_index = len(self._samples)
+                self._samples.append(HeartbeatSample(started, None))
+            completed_sample = None
+            cadence_started = started
             try:
-                self.latencies.append(self.gw.timed_call(method, params, timeout=self.per_call_timeout))
+                call_started, call_finished = self.gw.call_timing(method, params, timeout=self.per_call_timeout)
+                completed_sample = HeartbeatSample(call_started, call_finished)
+                cadence_started = call_started
+                self.latencies.append(call_finished - call_started)
             except Exception as exc:  # recorded and asserted by the test
                 self.failures.append(repr(exc)[:300])
                 if len(self.failures) > 3:
                     return
             finally:
+                with self._samples_lock:
+                    self._samples[sample_index] = (
+                        completed_sample if completed_sample is not None else HeartbeatSample(started, time.monotonic())
+                    )
                 self._inflight_since = None
             # The documented interval is between call starts, not an extra delay
             # after each reply. A slow call consumes the interval; never catch up
             # with a burst of missed polls or overlap requests.
-            self._stop.wait(max(0.0, self.interval - (time.monotonic() - started)))
+            self._stop.wait(max(0.0, self.interval - (time.monotonic() - cadence_started)))
 
     def __enter__(self) -> Heartbeat:
         self._inflight_since: float | None = None
+        self._observation_started = time.monotonic()
         self._thread.start()
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        # Cleanup may wait for an RPC; its late reply is not during-turn evidence.
+        self._observation_finished = time.monotonic()
         self._stop.set()
         self._thread.join(5.0)
         # A call still unanswered when the window closes counts with its age so far: a
@@ -215,6 +240,12 @@ class Heartbeat:
         since = self._inflight_since
         if self._thread.is_alive() and since is not None:
             self.latencies.append(time.monotonic() - since)
+
+    def sampling_snapshot(self) -> tuple[tuple[HeartbeatSample, ...], ObservationWindow]:
+        if self._observation_started is None or self._observation_finished is None:
+            raise RuntimeError("heartbeat observation is not closed")
+        with self._samples_lock:
+            return tuple(self._samples), ObservationWindow(self._observation_started, self._observation_finished)
 
 
 def gateway_cwd(root: Path) -> Path:
