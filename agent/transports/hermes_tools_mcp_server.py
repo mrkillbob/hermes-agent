@@ -178,6 +178,56 @@ def _build_server() -> Any:
         except (AttributeError, TypeError):
             logger.debug("hermes-tools MCP: failed to register identity resource; continuing with tools only")
 
+    # A2A peer discovery: read-only snapshot of configured peers (name, url, capabilities, tenant)
+    def _a2a_peers_payload() -> dict[str, object]:
+        try:
+            from hermes_cli.config import load_config_readonly
+            cfg = load_config_readonly() or {}
+            peers = []
+            for name, entry in (cfg.get("a2a_agents") or {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                peers.append({
+                    "name": name,
+                    "url": entry.get("url") or "",
+                    "capabilities": list(entry.get("capabilities") or []),
+                    "tenant": entry.get("tenant") or "",
+                })
+            return {"schema": "hermes.a2a.peers.v1", "peers": peers}
+        except Exception:
+            logger.exception("failed to read configured A2A peers")  # health: allow BLE001 -- boundary logs and returns empty payload
+            return {"schema": "hermes.a2a.peers.v1", "peers": []}
+
+    try:
+        mcp.resource("hermes://a2a-peers", name="hermes-a2a-peers",
+                     description="Configured A2A peers (name, url, capabilities, tenant)")(_a2a_peers_payload)
+    except (AttributeError, TypeError):
+        try:
+            mcp.add_resource(_a2a_peers_payload, uri="hermes://a2a-peers", name="hermes-a2a-peers",
+                             description="Configured A2A peers (name, url, capabilities, tenant)")
+        except (AttributeError, TypeError):
+            logger.debug("hermes-tools MCP: failed to register a2a-peers resource")
+
+    # A2A conversations: list persisted local context ids (for selection/continuation)
+    def _a2a_conversations_payload() -> dict[str, object]:
+        try:
+            from plugins.platforms.a2a import protocol as _a2a_proto
+            convos = list(_a2a_proto.list_conversations() or [])
+            return {"schema": "hermes.a2a.conversations.v1", "context_ids": convos[:500]}
+        except Exception:
+            logger.exception("failed to read A2A conversations")  # health: allow BLE001 -- boundary logs and returns empty payload
+            return {"schema": "hermes.a2a.conversations.v1", "context_ids": []}
+
+    try:
+        mcp.resource("hermes://a2a-conversations", name="hermes-a2a-conversations",
+                     description="Persisted local A2A conversation context IDs (subset)")(_a2a_conversations_payload)
+    except (AttributeError, TypeError):
+        try:
+            mcp.add_resource(_a2a_conversations_payload, uri="hermes://a2a-conversations", name="hermes-a2a-conversations",
+                             description="Persisted local A2A conversation context IDs (subset)")
+        except (AttributeError, TypeError):
+            logger.debug("hermes-tools MCP: failed to register a2a-conversations resource")
+
     exposed = _profile_scoped_exposed_tools()
     exposed_count = 0
     for name in exposed:
