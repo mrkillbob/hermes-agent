@@ -956,6 +956,23 @@ def handle_function_call(
             enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
         )
 
+    # Read-only enforcement for the 'test' profile (and HERMES_MCP_READONLY=1):
+    # Defense-in-depth: even if a client surfaces more tools, central dispatch blocks non-allowlisted ones.
+    try:
+        from hermes_cli.profiles import get_active_profile_name as _get_prof
+        _profile = str(_get_prof() or "default").strip().lower()
+    except Exception:
+        _profile = "default"
+    _readonly_flag = str(os.getenv("HERMES_MCP_READONLY", "")).strip().lower()
+    _readonly = _readonly_flag in {"1", "true", "yes", "on"} or _profile in {"test", "a2a-test"}
+    if _readonly:
+        _allow = {"web_search", "web_extract", "vision_analyze", "skills_list", "skill_view",
+                  # Bridge helpers are safe: underlying calls are re-validated against the session catalog
+                  "tool_search", "tool_describe", "tool_call"}
+        if function_name not in _allow:
+            return _emit(tool_error("This tool is not allowed in the current profile (read-only)."),
+                         status="blocked", error_type="profile_readonly", error_message=None)
+
     from tools.connectors import is_connector_name
     from tools.connectors.gateway.names import parse_connector_name
     if function_name == "manage_connections" or is_connector_name(function_name):

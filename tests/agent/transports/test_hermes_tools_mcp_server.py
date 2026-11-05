@@ -103,6 +103,18 @@ class TestModuleSurface:
         assert not missing, f"EXPOSED_TOOLS names no core tool registers: {sorted(missing)}"
 
 
+class TestProfileAllowlist:
+
+    def test_test_profile_readonly_subset(self, monkeypatch):
+        import importlib
+        import agent.transports.hermes_tools_mcp_server as m
+        monkeypatch.setenv("HERMES_MCP_READONLY", "1")
+        # Force reload so new env applies to helper
+        m = importlib.reload(m)
+        allowed = set(m._profile_scoped_exposed_tools())
+        assert allowed == {"web_search", "web_extract", "vision_analyze", "skills_list", "skill_view"}
+
+
 class TestMain:
     def test_main_returns_2_when_mcp_unavailable(self, monkeypatch):
         """When the mcp package isn't installed, main() should exit

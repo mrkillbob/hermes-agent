@@ -66,6 +66,29 @@ EXPOSED_TOOLS: tuple[str, ...] = (
     "kanban_create", "kanban_unblock", "kanban_link",
 )
 
+def _active_profile_name() -> str:
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        return str(get_active_profile_name() or "default")
+    except Exception:
+        return "default"
+
+
+def _profile_scoped_exposed_tools() -> tuple[str, ...]:
+    """Profile-aware exposed tool selection.
+
+    For security hardening, a profile may enforce a read-only subset for this MCP server.
+    The test profile policy: only web_search, web_extract, vision_analyze, skills_list, skill_view.
+    Additionally, when HERMES_MCP_READONLY is set (any truthy value), enforce the same subset.
+    """
+    profile = _active_profile_name().strip().lower()
+    readonly_flag = str(os.environ.get("HERMES_MCP_READONLY", "")).strip().lower()
+    readonly = readonly_flag in {"1", "true", "yes", "on"} or profile in {"test", "a2a-test"}
+    if not readonly:
+        return EXPOSED_TOOLS
+    readonly_allow = ("web_search", "web_extract", "vision_analyze", "skills_list", "skill_view")
+    return readonly_allow
+
 
 def _build_server() -> Any:
     """Create the MCP server with Hermes tools attached (lazy imports: importable without ``mcp``)."""
@@ -113,8 +136,9 @@ def _build_server() -> Any:
         _dispatch.__annotations__ = {**annots, "return": str}
         return _dispatch
 
+    exposed = _profile_scoped_exposed_tools()
     exposed_count = 0
-    for name in EXPOSED_TOOLS:
+    for name in exposed:
         spec = all_defs.get(name)
         if spec is None:
             logger.debug("skipping %s — not registered in this Hermes process", name)
@@ -128,7 +152,7 @@ def _build_server() -> Any:
             mcp.tool(name=name, description=description)(_make_handler(name, params_schema, description))
         exposed_count += 1
 
-    logger.info("hermes-tools MCP server registered %d/%d tools", exposed_count, len(EXPOSED_TOOLS))
+    logger.info("hermes-tools MCP server registered %d/%d tools (profile=%s)", exposed_count, len(exposed), _active_profile_name())
     return mcp
 
 
