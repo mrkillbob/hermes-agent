@@ -111,7 +111,9 @@ def _build_server() -> Any:
             "memory, skills, and cross-session search. "
             "Forward stable routing IDs (task/session/turn/request) to Hermes: "
             "read the 'hermes-identity' resource and include those IDs in your runtime, "
-            "or set HERMES_TASK_ID/HERMES_SESSION_ID/HERMES_TURN_ID/HERMES_API_REQUEST_ID in the environment."
+            "or set HERMES_TASK_ID/HERMES_SESSION_ID/HERMES_TURN_ID/HERMES_API_REQUEST_ID in the environment. "
+            "A2A-aware clients can also read 'hermes-a2a-peers' and 'hermes-a2a-conversations' "
+            "to select a target peer/profile and continue a saved context."
         ),
     )
 
