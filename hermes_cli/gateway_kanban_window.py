@@ -70,17 +70,30 @@ def _cancel(args):
 def _restore(args):
     if getattr(args, 'hold_id', None):
         from gateway.drain_startup import restore
-        restore(hold_id=args.hold_id)
+        restore(hold_id=args.hold_id, attested_sha256=_attested(args))
         return {'restored': True}
+    if getattr(args, 'attest_checkpoint_sha256', None) is not None:
+        raise ValueError('--attest-checkpoint-sha256 requires --hold-id')
     from gateway.drain_kanban import restore
     # The marker writer itself reserves canonical owner locks through restoration.
     restore(window_id=args.window_id, owner_stopped=True)
     return {'restored': True}
 
 
-def _hold(_args):
+def _attested(args):
+    """The lowercase checkpoint digest to attest, or None; a malformed digest refuses here."""
+    value = getattr(args, 'attest_checkpoint_sha256', None)
+    if value is None:
+        return None
+    value = value.lower()
+    if len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+        raise ValueError('--attest-checkpoint-sha256 must be a 64-character hex digest')
+    return value
+
+
+def _hold(args):
     from gateway.drain_startup import begin, status
-    begin()
+    begin(attested_sha256=_attested(args))
     return status()
 
 
@@ -147,7 +160,8 @@ def add_parser(subparsers):
     prepare.add_argument('--spawner-pid', type=int, required=True)
     prepare.add_argument('--spawner-birth', type=float, required=True)
     actions.add_parser('reconcile', help='Under ESTOP, assess legacy closure debt without changing the ledger')
-    actions.add_parser('hold', help='Under ESTOP, hold native startup without selecting or admitting any task')
+    hold = actions.add_parser('hold', help='Under ESTOP, hold native startup without selecting or admitting any task')
+    hold.add_argument('--attest-checkpoint-sha256', help='Validate the committed schema3 checkpoint with exactly this sha256, binding writers by content instead of ctime')
     actions.add_parser('status', help='Read the hold and grant without exposing the prior marker')
     for action in ('arm', 'cancel'):
         command = actions.add_parser(action)
@@ -156,4 +170,5 @@ def add_parser(subparsers):
     identity = restore.add_mutually_exclusive_group(required=True)
     identity.add_argument('--window-id')
     identity.add_argument('--hold-id')
+    restore.add_argument('--attest-checkpoint-sha256', help='As for hold; only with --hold-id')
     parser.set_defaults(func=cmd_gateway_drain)

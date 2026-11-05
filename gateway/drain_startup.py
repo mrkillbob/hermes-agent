@@ -76,12 +76,26 @@ def _checkout_custody(*, stable_identity=False):
         update_lock._release_checkout()
 
 
+def _writers(attested_sha256):
+    if attested_sha256 is None:
+        from hermes_cli.startup_hold_writer_checkpoint import reconciliation_writers
+        return reconciliation_writers()
+    from hermes_cli.startup_hold_reboot_attested import writers
+    return writers()
+
+
+def _exclusion(writers, attested_sha256):
+    if attested_sha256 is None:
+        from hermes_cli.startup_hold_reboot import reboot_exclusion
+        return reboot_exclusion(writers=writers)
+    from hermes_cli.startup_hold_reboot_attested import exclusion
+    return exclusion(writers=writers, attested_sha256=attested_sha256)
+
+
 @contextmanager
-def _transaction():
+def _transaction(attested_sha256=None):
     from agent.estop import is_engaged
     from hermes_cli.process_ledger_lock import ledger_gate
-    from hermes_cli.startup_hold_reboot import reboot_exclusion
-    from hermes_cli.startup_hold_writer_checkpoint import reconciliation_writers
     from gateway.drain_kanban import _marker_lock, _quiescent_profiles
     from hermes_cli.kanban_db_connect import _dispatch_host_admission_lock
     if not is_engaged():
@@ -89,7 +103,7 @@ def _transaction():
     with _checkout_custody(), _dispatch_host_admission_lock(strict=True) as acquired:
         if not acquired:
             raise RuntimeStoreError('startup_hold_dispatch_busy')
-        with startup_hold.admission_gate(), reconciliation_writers() as (covered, writers), _marker_lock(), _quiescent_profiles(), ledger_gate(), reboot_exclusion(writers=writers) as proof:
+        with startup_hold.admission_gate(), _writers(attested_sha256) as (covered, writers), _marker_lock(), _quiescent_profiles(), ledger_gate(), _exclusion(writers, attested_sha256) as proof:
             if proof.record is None:
                 _refuse_legacy_writers(covered)
             else:
@@ -112,10 +126,10 @@ def _validate_publication(marker, journal):
             raise RuntimeStoreError('startup_hold_state_too_large')
 
 
-def begin():
+def begin(*, attested_sha256=None):
     from gateway.drain_kanban import held
     from utils import atomic_json_write
-    with _transaction():
+    with _transaction(attested_sha256):
         if held():
             raise RuntimeStoreError('startup_hold_exists')
         raw = startup_hold.read_marker_bytes()
@@ -131,9 +145,9 @@ def begin():
     return value
 
 
-def restore(*, hold_id):
+def restore(*, hold_id, attested_sha256=None):
     from utils import atomic_write_bytes, fsync_directory
-    with _transaction():
+    with _transaction(attested_sha256):
         journal = _journal()
         value = journal['marker'][startup_hold.REASON]
         if value['hold_id'] != hold_id:

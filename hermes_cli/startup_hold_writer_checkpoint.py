@@ -55,6 +55,10 @@ class WriterSnapshot:
                 covered.add((record['pid'], record['create_time']))
         return covered
 
+    @staticmethod
+    def _changed(current, recorded):
+        return current != recorded
+
     def check(self):
         from hermes_cli.startup_hold_reconcile import _version
         if self.version is None:
@@ -63,7 +67,7 @@ class WriterSnapshot:
             return {'directory': None, 'files': []}
         info = self.directory.lstat()
         _secure(info, directory=True)
-        if _version(info) != self.version:
+        if self._changed(_version(info), self.version):
             _refuse('directory_identity_changed')
         if sorted(p.name for p in self.directory.iterdir()) != sorted(self.files):
             _refuse('membership_changed')
@@ -73,9 +77,9 @@ class WriterSnapshot:
             _secure(named)
             os.lseek(fd, 0, os.SEEK_SET)
             current = os.read(fd, 1025)
-            if _version(named) != version:
+            if self._changed(_version(named), version):
                 _refuse('named_reference_changed')
-            if _version(os.fstat(fd)) != version:
+            if self._changed(_version(os.fstat(fd)), version):
                 _refuse('opened_reference_changed')
             if current != raw:
                 _refuse('record_bytes_changed')
@@ -84,7 +88,7 @@ class WriterSnapshot:
 
 
 @contextmanager
-def capture_writers():
+def capture_writers(snapshot_class=None):
     """Admission is held by caller. Keep every original descriptor locked through publication."""
     from hermes_cli.startup_hold_reconcile import _version
     from pm.lifetime_handles import open_hold
@@ -96,7 +100,7 @@ def capture_writers():
         try:
             info = directory.lstat()
         except FileNotFoundError:
-            yield WriterSnapshot(directory, None, files)
+            yield (snapshot_class or WriterSnapshot)(directory, None, files)
             return
         _secure(info, directory=True)
         for path in sorted(directory.iterdir()):
@@ -113,7 +117,7 @@ def capture_writers():
                 _refuse('short_read')
             _record(raw)
             files[path.name] = (fd, _version(named), raw)
-        snapshot = WriterSnapshot(directory, _version(info), files)
+        snapshot = (snapshot_class or WriterSnapshot)(directory, _version(info), files)
         yield snapshot
         snapshot.check()
     finally:
