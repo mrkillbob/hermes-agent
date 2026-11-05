@@ -71,6 +71,7 @@ def _active_profile_name() -> str:
         from hermes_cli.profiles import get_active_profile_name
         return str(get_active_profile_name() or "default")
     except Exception:
+        logger.exception("failed to read active profile for MCP server; defaulting to 'default'")  # health: allow BLE001 -- boundary logs and falls back safely
         return "default"
 
 
@@ -82,7 +83,7 @@ def _profile_scoped_exposed_tools() -> tuple[str, ...]:
     Additionally, when HERMES_MCP_READONLY is set (any truthy value), enforce the same subset.
     """
     profile = _active_profile_name().strip().lower()
-    readonly_flag = str(os.environ.get("HERMES_MCP_READONLY", "")).strip().lower()
+    readonly_flag = str(os.environ.get("HERMES_MCP_READONLY", "")).strip().lower()  # health: allow HX002 -- profile-scoped safety gate; env is a compatibility override, not config
     readonly = readonly_flag in {"1", "true", "yes", "on"} or profile in {"test", "a2a-test"}
     if not readonly:
         return EXPOSED_TOOLS
@@ -107,7 +108,10 @@ def _build_server() -> Any:
             "session. Use these for capabilities Codex's built-in toolset "
             "doesn't cover: web search/extract, "
             "subagent delegation, vision, image generation, persistent "
-            "memory, skills, and cross-session search."
+            "memory, skills, and cross-session search. "
+            "Forward stable routing IDs (task/session/turn/request) to Hermes: "
+            "read the 'hermes-identity' resource and include those IDs in your runtime, "
+            "or set HERMES_TASK_ID/HERMES_SESSION_ID/HERMES_TURN_ID/HERMES_API_REQUEST_ID in the environment."
         ),
     )
 
@@ -127,10 +131,10 @@ def _build_server() -> Any:
                 # Drop None so unset optionals aren't forwarded to the handler.
                 args = {k: v for k, v in kwargs.items() if v is not None}
                 # Propagate stable IDs when the MCP client provides them via env; noop when unset.
-                task_id = os.getenv("HERMES_TASK_ID") or None
-                session_id = os.getenv("HERMES_SESSION_ID") or None
-                turn_id = os.getenv("HERMES_TURN_ID") or None
-                api_request_id = os.getenv("HERMES_API_REQUEST_ID") or None
+                task_id = os.getenv("HERMES_TASK_ID") or None  # health: allow HX002 -- correlation IDs only
+                session_id = os.getenv("HERMES_SESSION_ID") or None  # health: allow HX002 -- correlation IDs only
+                turn_id = os.getenv("HERMES_TURN_ID") or None  # health: allow HX002 -- correlation IDs only
+                api_request_id = os.getenv("HERMES_API_REQUEST_ID") or None  # health: allow HX002 -- correlation IDs only
                 return handle_function_call(
                     tool_name, args, task_id=task_id, session_id=session_id,
                     turn_id=turn_id, api_request_id=api_request_id,
@@ -144,6 +148,35 @@ def _build_server() -> Any:
         _dispatch.__signature__ = sig
         _dispatch.__annotations__ = {**annots, "return": str}
         return _dispatch
+
+    # Expose a read-only identity resource so MCP clients can discover Hermes routing IDs at handshake time.
+    def _identity_payload() -> dict[str, str | None]:
+        try:
+            from hermes_cli.profiles import get_active_profile_name as _get_prof
+            profile = str(_get_prof() or "default")
+        except Exception:
+            logger.exception("failed to read active profile for MCP identity; defaulting to 'default'")  # health: allow BLE001 -- boundary logs and falls back safely
+            profile = "default"
+        return {
+            "schema": "hermes.identity.v1",
+            "profile": profile,
+            "task_id": os.getenv("HERMES_TASK_ID"),  # health: allow HX002 -- correlation IDs propagated via env when present
+            "session_id": os.getenv("HERMES_SESSION_ID"),  # health: allow HX002 -- correlation IDs propagated via env when present
+            "turn_id": os.getenv("HERMES_TURN_ID"),  # health: allow HX002 -- correlation IDs propagated via env when present
+            "api_request_id": os.getenv("HERMES_API_REQUEST_ID"),  # health: allow HX002 -- correlation IDs propagated via env when present
+        }
+
+    try:
+        # Newer SDKs: decorator-style resource registration
+        mcp.resource("hermes://identity", name="hermes-identity",
+                     description="Active Hermes routing identity (profile, task/session/turn/request IDs)")(_identity_payload)
+    except (AttributeError, TypeError):
+        try:
+            # Older SDKs may expose an add_resource API (mirrors add_tool fallback above)
+            mcp.add_resource(_identity_payload, uri="hermes://identity", name="hermes-identity",
+                             description="Active Hermes routing identity (profile, task/session/turn/request IDs)")
+        except (AttributeError, TypeError):
+            logger.debug("hermes-tools MCP: failed to register identity resource; continuing with tools only")
 
     exposed = _profile_scoped_exposed_tools()
     exposed_count = 0

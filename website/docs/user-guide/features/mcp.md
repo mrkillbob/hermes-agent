@@ -150,6 +150,15 @@ This entry uses the existing catalog setup and storage behavior. It is
 separate from the retired `n8n` bridge, so existing connections, credentials,
 installed files, and tool selections are not replaced.
 
+### Hermes identity for A2A routing
+
+Hermes’ built-in hermes-tools MCP server exposes a read-only resource named `hermes-identity`
+(`hermes://identity`). Clients can read it at connect time to learn stable routing IDs:
+profile, task_id, session_id, turn_id, and api_request_id. Forward these with tool calls
+(e.g., via your runtime’s per-call metadata or by setting the environment variables
+HERMES_TASK_ID, HERMES_SESSION_ID, HERMES_TURN_ID, HERMES_API_REQUEST_ID) so Hermes can
+preserve durable delivery/ACK and profile-aware routing in A2A bridges.
+
 ### Tool selection at install time
 
 After credentials are configured, Hermes probes the MCP server to list every

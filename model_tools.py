@@ -962,8 +962,9 @@ def handle_function_call(
         from hermes_cli.profiles import get_active_profile_name as _get_prof
         _profile = str(_get_prof() or "default").strip().lower()
     except Exception:
+        logger.exception("failed to read active profile; defaulting to 'default'")  # health: allow BLE001 -- boundary logs and falls back safely
         _profile = "default"
-    _readonly_flag = str(os.getenv("HERMES_MCP_READONLY", "")).strip().lower()
+    _readonly_flag = str(os.getenv("HERMES_MCP_READONLY", "")).strip().lower()  # health: allow HX002 -- profile-scoped safety gate; env is a compatibility override, not config
     _readonly = _readonly_flag in {"1", "true", "yes", "on"} or _profile in {"test", "a2a-test"}
     if _readonly:
         _allow = {"web_search", "web_extract", "vision_analyze", "skills_list", "skill_view",
