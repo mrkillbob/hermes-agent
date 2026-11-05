@@ -125,7 +125,16 @@ def _build_server() -> Any:
         def _dispatch(**kwargs: Any) -> str:
             try:
                 # Drop None so unset optionals aren't forwarded to the handler.
-                return handle_function_call(tool_name, {k: v for k, v in kwargs.items() if v is not None})
+                args = {k: v for k, v in kwargs.items() if v is not None}
+                # Propagate stable IDs when the MCP client provides them via env; noop when unset.
+                task_id = os.getenv("HERMES_TASK_ID") or None
+                session_id = os.getenv("HERMES_SESSION_ID") or None
+                turn_id = os.getenv("HERMES_TURN_ID") or None
+                api_request_id = os.getenv("HERMES_API_REQUEST_ID") or None
+                return handle_function_call(
+                    tool_name, args, task_id=task_id, session_id=session_id,
+                    turn_id=turn_id, api_request_id=api_request_id,
+                )
             except Exception as exc:
                 logger.exception("tool %s raised", tool_name)
                 return json.dumps({"error": str(exc), "tool": tool_name})
