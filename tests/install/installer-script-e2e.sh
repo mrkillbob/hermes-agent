@@ -155,6 +155,8 @@ TARGET_LABEL="${UPDATE_REF:-HEAD}"
 TARGET_SHA="$(resolve_update_ref "$REPO_ROOT" "$OLD_SHA" "$TARGET_LABEL")" \
   || fail "cannot resolve update ref '$TARGET_LABEL'"
 [ "$OLD_SHA" != "$TARGET_SHA" ] || fail "OLD ($INSTALL_REF) IS the update target ($TARGET_LABEL); no update would be available"
+mkdir -p "$WORK_ROOT/logs"
+printf 'OLD_SHA=%s\nOLD_REF=%s\nTARGET_SHA=%s\n' "$OLD_SHA" "$INSTALL_REF" "$TARGET_SHA" > "$WORK_ROOT/shas.env"
 
 git clone --bare --quiet "$REPO_ROOT" "$SERVE_REPO"
 git -C "$SERVE_REPO" cat-file -e "$TARGET_SHA^{commit}" \
@@ -325,15 +327,42 @@ assert_user_shims() {
 
 # --- install OLD ---------------------------------------------------------------
 
+handle_old_install_failure() {
+  local rc="$1" error receipt failure_id platform
+  error="E2E ASSERTION FAILED: install.sh (old) exited $rc; log at $LOG_DIR/install-old.log"
+  [ -f "$LOG_DIR/install-old.log" ] || exit "$rc"
+  cp "$LOG_DIR/install-old.log" "$WORK_ROOT/logs/install-old.log"
+  case "$(uname -s)" in
+    Linux) platform=linux ;;
+    Darwin) platform=macos ;;
+    *) exit "$rc" ;;
+  esac
+  if receipt="$("$HERMES_E2E_NODE" "$ASSETS/known-failures.cjs" \
+    "$WORK_ROOT" "$INSTALL_METHOD" "$UPDATE_METHOD" "$error" "$platform" install)"; then
+    cp "$WORK_ROOT/known-failure.json" "$LOG_DIR/known-failure.json"
+    failure_id="$(printf '%s' "$receipt" | "$HERMES_E2E_NODE" -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>console.log(JSON.parse(s).id))')"
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+      printf 'known_failure=%s\n' "$failure_id" >> "$GITHUB_OUTPUT"
+    fi
+    printf 'Known historical install failure: %s\n' "$failure_id"
+    exit 0
+  fi
+  exit "$rc"
+}
+
 step "installing OLD ($INSTALL_REF) via its own scripts/install.sh ($INSTALL_METHOD)"
 EXPECT_DESKTOP=absent
 if [ "$INSTALL_METHOD" = "installer-script+desktop" ]; then
   EXPECT_DESKTOP=present
-  source_build_env run_source_installer "$REPO_ROOT" "$WORK_ROOT" "$LOG_DIR" "$OLD_SHA" old desktop
+  rc=0
+  source_build_env run_source_installer "$REPO_ROOT" "$WORK_ROOT" "$LOG_DIR" "$OLD_SHA" old desktop || rc=$?
+  [ "$rc" -eq 0 ] || handle_old_install_failure "$rc"
   assert_checkout "$OLD_SHA" OLD
   assert_desktop_artifact OLD
 else
-  source_build_env run_source_installer "$REPO_ROOT" "$WORK_ROOT" "$LOG_DIR" "$OLD_SHA" old
+  rc=0
+  source_build_env run_source_installer "$REPO_ROOT" "$WORK_ROOT" "$LOG_DIR" "$OLD_SHA" old || rc=$?
+  [ "$rc" -eq 0 ] || handle_old_install_failure "$rc"
   assert_checkout "$OLD_SHA" OLD
 fi
 

@@ -99,5 +99,8 @@ run_source_installer() {
   fi
   bash "$script" "${flags[@]}" < /dev/null 2>&1 | ts_prefix > "$logs/install-$label.log" || rc=$?
   log_group "install.sh ($label) transcript" "$logs/install-$label.log"
-  [ "$rc" -eq 0 ] || { fail "install.sh ($label) exited $rc; log at $logs/install-$label.log"; return "$rc"; }
+  if [ "$rc" -ne 0 ]; then
+    printf 'E2E ASSERTION FAILED: install.sh (%s) exited %s; log at %s\n' "$label" "$rc" "$logs/install-$label.log" >&2
+    return "$rc"
+  fi
 }

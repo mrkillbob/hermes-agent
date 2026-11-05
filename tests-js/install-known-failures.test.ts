@@ -21,6 +21,36 @@ const base = {
 }
 
 describe('known install failures', () => {
+  it('classifies only the evidenced Linux desktop install blocked by the old lockfile', () => {
+    const sample = {
+      platform: 'linux', phase: 'install', commit: 'e624e9fde561e1add9388384012b295fde669ade',
+      installMethod: 'installer-script+desktop', updateMethod: 'installer-script',
+      error: 'E2E ASSERTION FAILED: install.sh (old) exited 1; log at /tmp/e2e-logs/install-old.log',
+      logs: { install: 'error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.' },
+    }
+
+    expect(matchKnownFailure(sample)?.id).toBe('linux-august-release-stale-lock')
+    expect(matchKnownFailure({ ...sample, updateMethod: 'hermes-update' })).toBeNull()
+    expect(matchKnownFailure({ ...sample, platform: 'macos' })).toBeNull()
+    expect(matchKnownFailure({ ...sample, phase: 'update' })).toBeNull()
+    expect(matchKnownFailure({ ...sample, logs: { install: 'an unrelated installer failure' } })).toBeNull()
+
+    const root = mkdtempSync(path.join(os.tmpdir(), 'known-install-linux-'))
+
+    try {
+      mkdirSync(path.join(root, 'logs'))
+      writeFileSync(path.join(root, 'shas.env'), `OLD_SHA=${sample.commit}\nOLD_REF=v2026.8.18\nTARGET_SHA=${'f'.repeat(40)}\n`)
+      writeFileSync(path.join(root, 'logs/install-old.log'), sample.logs.install)
+      const args = [classifier, root, sample.installMethod, sample.updateMethod, sample.error, 'linux', 'install']
+      expect(spawnSync(process.execPath, args).status).toBe(0)
+      expect(JSON.parse(readFileSync(path.join(root, 'known-failure.json'), 'utf8')).installRef).toBe('v2026.8.18')
+      writeFileSync(path.join(root, 'logs/install-old.log'), 'an unrelated installer failure')
+      expect(spawnSync(process.execPath, args).status).toBe(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('recognizes the released launcher self-lock, not generic access denied', () => {
     expect(matchKnownFailure(base)?.id).toBe('windows-launcher-self-lock')
     expect(matchKnownFailure({ ...base, logs: { update: lockedLog.replaceAll('hermes.exe', 'other.exe') } })).toBeNull()
@@ -107,14 +137,22 @@ it('renders known receipts as footnotes, without suppressing a red job', async (
   const modulePath = new URL('../scripts/sandbox/generate-e2e-matrix.mjs', import.meta.url).href
   const { renderMarkdownResults, legId } = await import(/* @vite-ignore */ modulePath)
   const name = 'windows: installer-script -> hermes-update (v2026.3.12 -> HEAD)'
-  const artifacts = new Map([[`install-e2e-known-${rules[0].id}--${legId(name)}`, 42]])
+  const windowsRule = rules.find((rule: { id: string; title: string }) => rule.id === 'windows-launcher-self-lock')!
+  const artifacts = new Map([[`install-e2e-known-${windowsRule.id}--${legId(name)}`, 42]])
   const known = renderMarkdownResults([{ name: name + ' / e2e', conclusion: 'success' }], [], artifacts)
   expect(known).toContain('0 passed, 0 failed, 1 known failures')
   expect(known).toContain('known [^1]')
-  expect(known).toContain(`[^1]: **${rules[0].title}.**`)
+  expect(known).toContain(`[^1]: **${windowsRule.title}.**`)
   const failed = renderMarkdownResults([{ name: name + ' / e2e', conclusion: 'failure' }], [], artifacts)
   expect(failed).toContain('0 passed, 1 failed, 0 known failures')
   expect(failed).not.toContain('known [^1]')
   const passed = renderMarkdownResults([{ name: name + ' / e2e', conclusion: 'success' }])
   expect(passed).toContain('1 passed, 0 failed, 0 known failures')
+
+  const linuxName = 'linux: installer-script+desktop -> installer-script (v2026.8.18 -> HEAD)'
+  const linuxRule = rules.find((rule: { id: string; title: string }) => rule.id === 'linux-august-release-stale-lock')!
+  const linuxArtifacts = new Map([[`install-e2e-known-${linuxRule.id}--${legId(linuxName)}`, 43]])
+  const linuxKnown = renderMarkdownResults([{ name: linuxName + ' / install & update', conclusion: 'success' }], [], linuxArtifacts)
+  expect(linuxKnown).toContain('0 passed, 0 failed, 1 known failures')
+  expect(linuxKnown).toContain(`[^1]: **${linuxRule.title}.**`)
 })

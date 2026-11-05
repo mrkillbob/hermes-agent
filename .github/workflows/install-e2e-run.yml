@@ -102,6 +102,17 @@ jobs:
           ref: ${{ inputs.commit || github.sha }}
           fetch-depth: 0
 
+      - name: Install Linux desktop build and runtime dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            xvfb bubblewrap \
+            libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 \
+            xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64 \
+            libx11-dev libxi-dev
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       # The checkout owns the chat driver, not OLD's installed Node/runtime.
       - name: Set up driver tools only
         uses: ./.github/actions/setup-pm
@@ -125,6 +136,7 @@ jobs:
           output: ${{ runner.temp }}/e2e-logs/recording.mkv
 
       - name: Run install + update E2E
+        id: e2e
         run: |
           set -euo pipefail
           tests/install/installer-script-e2e.sh \
@@ -136,6 +148,15 @@ jobs:
           # Outside the workspace on purpose: logs written into the repo
           # would trip the driver's own dirty-tree guard.
           HERMES_E2E_LOG_DIR: ${{ runner.temp }}/e2e-logs
+
+      - name: Upload known-failure receipt
+        if: always() && steps.e2e.outputs.known_failure != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: install-e2e-known-${{ steps.e2e.outputs.known_failure }}--${{ inputs.leg-id }}
+          path: ${{ runner.temp }}/e2e-logs/known-failure.json
+          retention-days: 14
+          if-no-files-found: error
 
       - name: Stop screen recording
         if: always()

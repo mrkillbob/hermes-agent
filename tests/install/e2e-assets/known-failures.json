@@ -1,5 +1,18 @@
 [
   {
+    "id": "linux-august-release-stale-lock",
+    "title": "August Linux desktop install is blocked by its stale uv.lock",
+    "phases": ["install"],
+    "platforms": ["linux"],
+    "commits": ["e624e9fde561e1add9388384012b295fde669ade"],
+    "cases": [["installer-script+desktop", "installer-script"]],
+    "errors": ["^E2E ASSERTION FAILED: install\\.sh \\(old\\) exited [1-9][0-9]*; log at .*/install-old\\.log$"],
+    "log": "install",
+    "signatures": ["error: The lockfile at `uv\\.lock` needs to be updated, but `--locked` was provided\\."],
+    "explanation": "The v2026.8.18 script-enabled desktop install stops before the update starts because that released checkout's pyproject.toml and uv.lock no longer agree. The update target cannot change the already published starting release; only this exact Linux install method and failure transcript are classified.",
+    "evidence": "https://github.com/Coding-Sensations/hermes-agent/actions/runs/42055516392/job/127343097416"
+  },
+  {
     "id": "windows-launcher-self-lock",
     "title": "Released Windows updater locks its own console launcher",
     "commits": ["a370ab8391ca5f8de7ebbc449f05cb0df36ade7c", "86960cdbb0148145890e2ee90b4e157fa899f6e1"],
