@@ -3,12 +3,16 @@
 The strict proof binds each writer reference by its full file version, including ctime. ctime is
 an OS-maintained timestamp that any metadata touch moves, so the proof can be lost to it with no
 writer changed. With the checkpoint's exact sha256 supplied, the same facts are bound by inode,
-size, mtime, link count and content hash instead, and the recovery source recorded in the proof
-must still exist at its recorded path with its recorded hash. Everything else stays strict: host,
+size, mtime, link count and content hash instead, and the recovery source named in the proof must
+still exist at its recorded path with its recorded hash. Everything else stays strict: host,
 native volume, root identity, the full ledger version, the later native boot, live-writer refusal
 and closure of every selected row. The attested path never writes, deletes or settles a record.
+
+The attested hash is not a secret: anyone who can run the command can compute it from the readable
+checkpoint. It guards against consuming the wrong record, not against an operator who means to.
 """
 from contextlib import contextmanager
+import functools
 import hashlib
 import json
 import os
@@ -27,29 +31,9 @@ def _stable(version):
 class _AttestedSnapshot(WriterSnapshot):
     """Within-run consistency without ctime, so a metadata touch is not mistaken for a change."""
 
-    def check(self):
-        from hermes_cli.startup_hold_reconcile import _version
-        from hermes_cli.startup_hold_writer_checkpoint import _refuse, _secure
-        if self.version is None:
-            if self.directory.exists() or self.directory.is_symlink():
-                _refuse()
-            return {'directory': None, 'files': []}
-        info = self.directory.lstat()
-        _secure(info, directory=True)
-        if (_stable(_version(info)) != _stable(self.version)
-                or sorted(p.name for p in self.directory.iterdir()) != sorted(self.files)):
-            _refuse()
-        rows = []
-        for name, (fd, version, raw) in sorted(self.files.items()):
-            named = (self.directory / name).lstat()
-            _secure(named)
-            os.lseek(fd, 0, os.SEEK_SET)
-            current = os.read(fd, 1025)
-            if (_stable(_version(named)) != _stable(version)
-                    or _stable(_version(os.fstat(fd))) != _stable(version) or current != raw):
-                _refuse()
-            rows.append({'name': name, 'version': list(version), 'sha256': hashlib.sha256(raw).hexdigest()})
-        return {'directory': list(self.version), 'files': rows}
+    @staticmethod
+    def _changed(current, recorded):
+        return _stable(current) != _stable(recorded)
 
 
 @contextmanager
@@ -74,18 +58,29 @@ def _writers_match(recorded, snapshot):
             _refuse()
 
 
-def _make_proof():
+@functools.cache
+def _proof_class():
     from hermes_cli import startup_hold_reboot as reboot
 
     class _AttestedProof(reboot._Proof):
+        def __init__(self, record, fd, version, writers, attested_sha256):
+            super().__init__(record, fd, version, writers)
+            self.attested_sha256 = attested_sha256
+
         def check(self):
             from hermes_cli.startup_hold_reconcile import _version
             from hermes_cli.startup_hold_writers import refuse_live_writers
             reboot._paused()
             refuse_live_writers()
             path = get_default_hermes_root() / reboot._FILENAME
+            named = path.lstat()
             if (_stable(_version(os.fstat(self.fd))) != self.version
-                    or _stable(_version(path.lstat())) != self.version):
+                    or _stable(_version(named)) != self.version):
+                reboot._refuse()
+            # ctime is not consulted, so re-hash the held bytes: a same-size rewrite with a
+            # restored mtime must not pass.
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            if hashlib.sha256(reboot._read_checkpoint(self.fd, named)).hexdigest() != self.attested_sha256:
                 reboot._refuse()
             try:
                 recorded = self.record['binding']
@@ -96,10 +91,9 @@ def _make_proof():
                 _writers_match(recorded_writers, self.writers)
             except (KeyError, TypeError, ValueError, OSError):
                 reboot._refuse()
-            binding, entries = reboot._binding(schema=3, writers=self.writers)
+            binding, entries = reboot._binding(schema=3, writers=self.writers, source=retained)
             self.rows = reboot.validate(
-                self.record, dict(binding, source=retained, writers=recorded_writers),
-                entries, reboot._native_identity())
+                self.record, dict(binding, writers=recorded_writers), entries, reboot._native_identity())
 
     return _AttestedProof
 
@@ -123,15 +117,10 @@ def exclusion(*, writers, attested_sha256):
     if fd is None:
         reboot._refuse()
     try:
-        if _stable(_version(os.fstat(fd))) != _stable(_version(named)) or named.st_size > reboot._LIMIT:
+        if _stable(_version(os.fstat(fd))) != _stable(_version(named)):
             reboot._refuse()
-        raw = b''
-        while len(raw) <= reboot._LIMIT:
-            chunk = os.read(fd, reboot._LIMIT + 1 - len(raw))
-            if not chunk:
-                break
-            raw += chunk
-        if len(raw) != named.st_size or hashlib.sha256(raw).hexdigest() != attested_sha256:
+        raw = reboot._read_checkpoint(fd, named)
+        if hashlib.sha256(raw).hexdigest() != attested_sha256:
             reboot._refuse()
         try:
             record = json.loads(raw.decode('utf-8'))
@@ -139,7 +128,7 @@ def exclusion(*, writers, attested_sha256):
             reboot._refuse()
         if not isinstance(record, dict) or record.get('schema') != 3:
             reboot._refuse()
-        proof = _make_proof()(record, fd, _stable(_version(named)), writers)
+        proof = _proof_class()(record, fd, _stable(_version(named)), writers, attested_sha256)
         proof.check()
         yield proof
         proof.check()

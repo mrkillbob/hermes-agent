@@ -94,7 +94,7 @@ def _source_binding(root=None):
     return dict(path=str(root), sha256=_hash(hashes))
 
 
-def _binding(schema=2, writers=None):
+def _binding(schema=2, writers=None, source=None):
     from hermes_cli.startup_hold_reconcile import ledger_snapshot, _version
     if type(schema) is not int or schema not in (1, 2, 3):
         _refuse()
@@ -109,7 +109,7 @@ def _binding(schema=2, writers=None):
             or after.st_uid != _uid() or after.st_mode & 0o022):
         _refuse()
     binding = dict(root=dict(path=str(root), device=info.st_dev, inode=info.st_ino, uid=_uid()),
-                   source=_source_binding(), ledger=dict(sha256=digest, version=list(_version(after))))
+                   source=_source_binding() if source is None else source, ledger=dict(sha256=digest, version=list(_version(after))))
     if schema >= 2:
         binding['volume'] = _volume_binding(root, path, info, after)
     if schema == 3:
@@ -289,6 +289,21 @@ class _Proof:
         self.rows = validate(self.record, binding, entries, _native_identity())
 
 
+def _read_checkpoint(fd, named):
+    """The complete bounded checkpoint bytes; a size mismatch is a torn or oversized record."""
+    if named.st_size > _LIMIT:
+        _refuse()
+    raw = b''
+    while len(raw) <= _LIMIT:
+        chunk = os.read(fd, _LIMIT + 1 - len(raw))
+        if not chunk:
+            break
+        raw += chunk
+    if len(raw) != named.st_size:
+        _refuse()
+    return raw
+
+
 @contextmanager
 def reboot_exclusion(*, writers=None):
     """Caller retains checkout, admission, writer, profile and ledger gates through publication."""
@@ -309,16 +324,9 @@ def reboot_exclusion(*, writers=None):
     if fd is None:
         _refuse()
     try:
-        if _version(os.fstat(fd)) != _version(named) or named.st_size > _LIMIT:
+        if _version(os.fstat(fd)) != _version(named):
             _refuse()
-        raw = b''
-        while len(raw) <= _LIMIT:
-            chunk = os.read(fd, _LIMIT + 1 - len(raw))
-            if not chunk:
-                break
-            raw += chunk
-        if len(raw) != named.st_size:
-            _refuse()
+        raw = _read_checkpoint(fd, named)
         try:
             record = json.loads(raw.decode('utf-8'))
         except (ValueError, UnicodeError):

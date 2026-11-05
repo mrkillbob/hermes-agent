@@ -70,17 +70,30 @@ def _cancel(args):
 def _restore(args):
     if getattr(args, 'hold_id', None):
         from gateway.drain_startup import restore
-        restore(hold_id=args.hold_id, attested_sha256=getattr(args, 'attest_checkpoint_sha256', None))
+        restore(hold_id=args.hold_id, attested_sha256=_attested(args))
         return {'restored': True}
+    if getattr(args, 'attest_checkpoint_sha256', None) is not None:
+        raise ValueError('--attest-checkpoint-sha256 requires --hold-id')
     from gateway.drain_kanban import restore
     # The marker writer itself reserves canonical owner locks through restoration.
     restore(window_id=args.window_id, owner_stopped=True)
     return {'restored': True}
 
 
+def _attested(args):
+    """The lowercase checkpoint digest to attest, or None; a malformed digest refuses here."""
+    value = getattr(args, 'attest_checkpoint_sha256', None)
+    if value is None:
+        return None
+    value = value.lower()
+    if len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+        raise ValueError('--attest-checkpoint-sha256 must be a 64-character hex digest')
+    return value
+
+
 def _hold(args):
     from gateway.drain_startup import begin, status
-    begin(attested_sha256=getattr(args, 'attest_checkpoint_sha256', None))
+    begin(attested_sha256=_attested(args))
     return status()
 
 

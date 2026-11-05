@@ -55,6 +55,10 @@ class WriterSnapshot:
                 covered.add((record['pid'], record['create_time']))
         return covered
 
+    @staticmethod
+    def _changed(current, recorded):
+        return current != recorded
+
     def check(self):
         from hermes_cli.startup_hold_reconcile import _version
         if self.version is None:
@@ -63,7 +67,7 @@ class WriterSnapshot:
             return {'directory': None, 'files': []}
         info = self.directory.lstat()
         _secure(info, directory=True)
-        if _version(info) != self.version:
+        if self._changed(_version(info), self.version):
             _refuse('directory_identity_changed')
         if sorted(p.name for p in self.directory.iterdir()) != sorted(self.files):
             _refuse('membership_changed')
@@ -73,9 +77,9 @@ class WriterSnapshot:
             _secure(named)
             os.lseek(fd, 0, os.SEEK_SET)
             current = os.read(fd, 1025)
-            if _version(named) != version:
+            if self._changed(_version(named), version):
                 _refuse('named_reference_changed')
-            if _version(os.fstat(fd)) != version:
+            if self._changed(_version(os.fstat(fd)), version):
                 _refuse('opened_reference_changed')
             if current != raw:
                 _refuse('record_bytes_changed')

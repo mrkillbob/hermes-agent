@@ -16,6 +16,10 @@ _BEFORE = fixtures._BEFORE
 
 pytestmark = pytest.mark.platforms('posix')
 
+from hermes_cli import startup_hold_reboot as _reboot
+
+_REAL_SOURCE_BINDING = _reboot._source_binding  # before any fixture replaces it
+
 
 @pytest.fixture
 def attested(environment, monkeypatch, tmp_path):
@@ -209,3 +213,87 @@ def test_cli_exposes_the_attestation_only_on_hold_and_restore():
     assert parser.parse_args(['drain', 'hold']).attest_checkpoint_sha256 is None
     with pytest.raises(SystemExit):
         parser.parse_args(['drain', 'begin', '--task-id', 't', '--attest-checkpoint-sha256', 'a' * 64])
+
+
+def test_same_size_checkpoint_rewrite_with_restored_mtime_fails_the_next_check(attested):
+    from hermes_cli import startup_hold_reboot_attested as module
+    home, _, _, digest = attested
+    path = home / '.startup-legacy-reboot.json'
+    with module.writers() as (_, snapshot):
+        with module.exclusion(writers=snapshot, attested_sha256=digest) as proof:
+            stamp = path.stat().st_mtime_ns
+            raw = path.read_bytes()
+            index = raw.index(b'"id": "') + 7
+            swapped = raw[:index] + (b'0' if raw[index:index + 1] != b'0' else b'1') + raw[index + 1:]
+            assert len(swapped) == len(raw) and swapped != raw
+            with open(path, 'r+b') as handle:
+                handle.write(swapped)
+            os.utime(path, ns=(stamp, stamp))
+            with pytest.raises(RuntimeError, match='startup_hold_reboot_unavailable'):
+                proof.check()
+            path.write_bytes(raw)
+            os.utime(path, ns=(stamp, stamp))
+            proof.check()
+
+
+def test_schema2_checkpoint_is_not_attestable(environment, monkeypatch):
+    from gateway import drain_startup
+    from hermes_cli import startup_hold_reboot as reboot
+    home, _ = environment
+    prepare(environment)
+    digest = hashlib.sha256((home / '.startup-legacy-reboot.json').read_bytes()).hexdigest()
+    assert json.loads((home / '.startup-legacy-reboot.json').read_text())['schema'] == 2
+    monkeypatch.setattr(reboot, '_native_identity', lambda: dict(_AFTER))
+    with pytest.raises(RuntimeError, match='startup_hold_reboot_unavailable'):
+        drain_startup.begin(attested_sha256=digest)
+    assert not _held(home)
+
+
+def test_checkpoint_held_by_another_process_refuses(attested, monkeypatch):
+    from gateway import drain_startup
+    from pm import lifetime_handles
+    home, _, _, digest = attested
+    real = lifetime_handles.open_hold
+    monkeypatch.setattr(lifetime_handles, 'open_hold',
+                        lambda path, **kwargs: None if Path(path).name == '.startup-legacy-reboot.json' else real(path, **kwargs))
+    with pytest.raises(RuntimeError, match='startup_hold_reboot_unavailable'):
+        drain_startup.begin(attested_sha256=digest)
+    assert not _held(home)
+
+
+def test_real_source_binding_follows_included_files_only(tmp_path):
+    root = tmp_path / 'tree'
+    (root / 'sub').mkdir(parents=True)
+    (root / 'tests').mkdir()
+    (root / 'venv').mkdir()
+    (root / 'a.py').write_text('x = 1\n')
+    (root / 'sub' / 'b.sh').write_text('echo b\n')
+    first = _REAL_SOURCE_BINDING(root)
+    assert first['path'] == str(root)
+    (root / 'tests' / 'skipped.py').write_text('ignored\n')
+    (root / 'venv' / 'skipped.py').write_text('ignored\n')
+    (root / 'notes.txt').write_text('not a source suffix\n')
+    assert _REAL_SOURCE_BINDING(root) == first
+    (root / 'a.py').write_text('x = 2\n')
+    assert _REAL_SOURCE_BINDING(root) != first
+    (root / 'link').symlink_to(tmp_path)
+    with pytest.raises(RuntimeError, match='startup_hold_reboot_unavailable'):
+        _REAL_SOURCE_BINDING(root)
+
+
+def test_cli_normalizes_the_digest_and_requires_a_hold_id(attested):
+    import argparse
+    from hermes_cli import gateway_kanban_window as window
+    home, _, _, digest = attested
+    upper = argparse.Namespace(drain_action='hold', attest_checkpoint_sha256=digest.upper())
+    status = window.execute(upper)
+    assert status['held'] is True
+    restored = window.execute(argparse.Namespace(drain_action='restore', hold_id=status['hold_id'],
+                                                 window_id=None, attest_checkpoint_sha256=digest.upper()))
+    assert restored == {'restored': True}
+    with pytest.raises(ValueError, match='requires --hold-id'):
+        window.execute(argparse.Namespace(drain_action='restore', hold_id=None, window_id='w',
+                                          attest_checkpoint_sha256=digest))
+    with pytest.raises(ValueError, match='64-character'):
+        window.execute(argparse.Namespace(drain_action='hold', attest_checkpoint_sha256='abc'))
+    assert not _held(home)

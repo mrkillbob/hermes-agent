@@ -57,3 +57,10 @@ refuse. The attested path never writes, deletes or settles a record, and hold an
 retire the retained custody records. A wrong, malformed or stale hash refuses before anything is
 published.
 
+The attested hash is not a secret: anyone who can run the command can compute it from the readable
+checkpoint, and the attested path compares the recorded source binding with itself once the retained
+source has been verified. It guards against consuming the wrong record, not against an operator who
+means to; do not treat it as an independent authorization. The checkpoint is re-hashed on every
+check because ctime is no longer consulted. The flag is accepted only with `hold` and with
+`restore --hold-id`, and uppercase hex digests are normalized.
+
