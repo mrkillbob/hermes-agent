@@ -4,6 +4,18 @@ These failures cannot be repaired by changing the update target: the failing cod
 
 The machine-readable rules in `e2e-assets/known-failures.json` own the matcher and report footnote text. This document explains their historical evidence. Logs are rotated before each attempt so an earlier failure cannot classify a later one.
 
+## August Linux desktop install has a stale lock
+
+Classification: **unfixable before reaching the update target for this exact historical desktop-enabled install**.
+
+Starting release: `v2026.8.18`, commit `e624e9fde561e1add9388384012b295fde669ade`.
+
+| Install → update | Verified failing job |
+|---|---|
+| `installer-script+desktop` → `installer-script` | [127343097416](https://github.com/Coding-Sensations/hermes-agent/actions/runs/42055516392/job/127343097416) |
+
+The released installer exits while resolving Python dependencies because its `pyproject.toml` and `uv.lock` disagree (`The lockfile at uv.lock needs to be updated, but --locked was provided`). The update target cannot fix an install that cannot reach it. Classification is limited to this commit, Linux, this method pair, the install assertion, and the fresh lockfile error; other errors on the same release remain red.
+
 ## Windows launcher self-lock
 
 Classification: **unfixable in the update target for the exact released `hermes.exe update` path**.

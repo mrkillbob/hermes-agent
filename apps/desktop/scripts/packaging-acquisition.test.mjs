@@ -71,6 +71,28 @@ test('a transient connection timeout can recover without restarting packaging pr
   }
 })
 
+test('a transient HTTP response can recover without restarting packaging preparation', async () => {
+  vi.useFakeTimers()
+  try {
+    let calls = 0
+    const pending = acquisition.acquirePackagingInput('Electron archive', async () => {
+      calls++
+      if (calls === 1) {
+        throw Object.assign(new Error('private supplier diagnostic'), {
+          response: { statusCode: 503, url: 'https://example.com/private?token=secret' },
+        })
+      }
+      return '/verified/electron.zip'
+    })
+    const result = pending.then(value => ({ value }), error => ({ error }))
+    await vi.runAllTimersAsync()
+    assert.deepEqual(await result, { value: '/verified/electron.zip' })
+    assert.equal(calls, 2)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
 test('repeated connection timeouts exhaust a bounded retry budget and keep diagnostics sanitized', async () => {
   vi.useFakeTimers()
   try {

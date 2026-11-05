@@ -11,11 +11,10 @@ export async function acquirePackagingInput(resource, acquire) {
     try {
       return await acquire()
     } catch (error) {
-      const { facts, connectionTimeout } = packagingFailure(error)
-      // The pinned builder retries top-level transport codes, but Node fetch
-      // nests Undici's connect timeout in TypeError.cause. Its tool cache resets
-      // on failure, so another acquisition can recover without weakening hashes.
-      if (connectionTimeout && attempt < 2) {
+      const { facts, connectionTimeout, transientHttp } = packagingFailure(error)
+      // Some builders retry only top-level network codes. Preserve integrity
+      // checks while retrying nested timeouts and transient HTTP responses.
+      if ((connectionTimeout || transientHttp) && attempt < 2) {
         await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)))
         continue
       }
@@ -24,10 +23,11 @@ export async function acquirePackagingInput(resource, acquire) {
   }
 }
 
-/** @param {unknown} error @returns {{ facts: string[], connectionTimeout: boolean }} */
+/** @param {unknown} error @returns {{ facts: string[], connectionTimeout: boolean, transientHttp: boolean }} */
 function packagingFailure(error) {
   const facts = []
   let connectionTimeout = false
+  let transientHttp = false
   const seen = new Set()
   const pending = [error]
   while (pending.length && seen.size < 8) {
@@ -37,8 +37,12 @@ function packagingFailure(error) {
     if (cause.code === 'UND_ERR_CONNECT_TIMEOUT') connectionTimeout = true
     if (typeof cause.name === 'string' && /^[A-Za-z][A-Za-z0-9]*Error$|^Error$/.test(cause.name)) facts.push(cause.name)
     if (typeof cause.code === 'string' && /^[A-Z][A-Z_0-9]{0,63}$/.test(cause.code)) facts.push(`code=${cause.code}`)
-    const status = cause.statusCode ?? cause.status
-    if (Number.isInteger(status) && status >= 100 && status <= 599) facts.push(`status=${status}`)
+    const response = cause.response && typeof cause.response === 'object' ? cause.response : null
+    const status = cause.statusCode ?? cause.status ?? response?.statusCode ?? response?.status
+    if (Number.isInteger(status) && status >= 100 && status <= 599) {
+      facts.push(`status=${status}`)
+      if (status === 408 || status === 425 || status === 429 || status >= 500) transientHttp = true
+    }
     if (typeof cause.url === 'string') {
       try {
         const url = new URL(cause.url)
@@ -48,5 +52,5 @@ function packagingFailure(error) {
     if (cause.cause) pending.push(cause.cause)
     if (Array.isArray(cause.errors)) pending.push(...cause.errors.slice(0, 8))
   }
-  return { facts: [...new Set(facts)], connectionTimeout }
+  return { facts: [...new Set(facts)], connectionTimeout, transientHttp }
 }
