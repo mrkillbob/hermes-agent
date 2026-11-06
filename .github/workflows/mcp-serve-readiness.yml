@@ -9,6 +9,9 @@ on:
       - 'tests/**'
       - '.github/workflows/mcp-serve-readiness.yml'
 
+permissions:
+  contents: read
+
 jobs:
   durability-and-artifacts:
     runs-on: ubuntu-latest
@@ -85,6 +88,7 @@ print('Wrote artifacts/identity.json and artifacts/qualify.json')
 PY
 
       - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hermes-mcp-serve-readiness-${{ github.run_id }}
