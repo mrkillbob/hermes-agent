@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- upstream sync merged its redaction additions; union of fork+upstream, no new behavior
 """Regex-based secret redaction for logs and tool output.
 
 Short tokens (< 18 chars) are fully masked; longer ones keep the first 6 and

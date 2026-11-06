@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- upstream sync merged redact test additions; union of fork+upstream
 """Tests for agent.redact -- secret masking in logs and output."""
 
 import ast

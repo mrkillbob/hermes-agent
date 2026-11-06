@@ -83,6 +83,16 @@ export function ConfirmDialog({
   useLayoutEffect(() => {
     lifetimeRef.current = open ? Symbol('confirmation') : null
 
+    return () => {
+      lifetimeRef.current = null
+
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current)
+        closeTimerRef.current = null
+      }
+    }
+  }, [open])
+
   // Cancel the pending close timer on unmount. The timer below holds the
   // "done" beat visible for 600ms, and an unmount inside that window used to
   // leave it armed. It then called onClose on a tree that is gone, which
@@ -98,15 +108,9 @@ export function ConfirmDialog({
     unmountedRef.current = false
 
     return () => {
-      lifetimeRef.current = null
       unmountedRef.current = true
-
-      if (closeTimerRef.current !== null) {
-        window.clearTimeout(closeTimerRef.current)
-        closeTimerRef.current = null
-      }
     }
-  }, [open])
+  }, [])
 
   async function run() {
     const lifetime = lifetimeRef.current

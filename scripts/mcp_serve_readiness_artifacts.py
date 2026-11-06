@@ -55,7 +55,7 @@ def _active_profile() -> str:
     try:
         from hermes_cli.profiles import get_active_profile_name
         return str(get_active_profile_name() or "default")
-    except Exception:
+    except Exception:  # health: allow BLE001 -- readiness blob must never fail on an unreadable profile; default the id and continue
         return "default"
 
 

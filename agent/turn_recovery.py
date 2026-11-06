@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- upstream sync merged retry handler additions; union of fork+upstream
 """Recovery-branch handlers for the conversation turn's inner retry loop.
 
 When the model call raises, one-shot recovery chains run before the generic retry/backoff

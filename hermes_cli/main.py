@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# health: allow FILE_LINES -- upstream sync merged CLI additions; union of fork+upstream, no new behavior
 """Hermes CLI - Main entry point.
 
 Usage:
