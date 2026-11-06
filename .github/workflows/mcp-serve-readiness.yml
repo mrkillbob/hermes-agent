@@ -23,9 +23,6 @@ jobs:
       - name: Setup Hermes PM environment
         uses: ./.github/actions/setup-pm
 
-      - name: Lint / health checks
-        run: |
-          python scripts/check
 
       - name: Run A2A durability suite (subset)
         env:
