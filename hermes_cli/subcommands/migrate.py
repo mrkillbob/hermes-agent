@@ -60,6 +60,11 @@ def _add_agent_import_parsers(migrate_subparsers) -> None:
         sub.add_argument("--dry-run", action="store_true", help="Preview only")
         sub.add_argument("--overwrite", action="store_true", help="Replace existing items on name conflicts")
         sub.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+        # Capture options: when used with --dry-run, core captures the importer's preview output
+        # to the given directory as raw text and JSON for review/archival by tooling.
+        sub.add_argument(
+            "--capture-dir",
+            help="Directory to write importer dry-run artifacts (raw.txt, report.json, optional patch)")
         if source.name == "openclaw":
             sub.add_argument("--migrate-secrets", action="store_true",
                              help="Also import OpenClaw's allowlisted API keys and bot tokens")
