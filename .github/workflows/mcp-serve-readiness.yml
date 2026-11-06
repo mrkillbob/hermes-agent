@@ -59,17 +59,20 @@ jobs:
 import json, os
 os.environ['HERMES_MCP_READONLY']='1'
 from agent.transports import hermes_tools_mcp_server as m
-# Build server and locate resources
-srv = m._build_server()
-resources = getattr(srv, '_resources', [])
-byname = {r.get('name'): r for r in resources if isinstance(r, dict)}
-# Identity payload
-identity = {}
-if 'hermes-identity' in byname:
-    try:
-        identity = byname['hermes-identity']['fn']() or {}
-    except Exception as e:
-        identity = {'error': str(e)}
+# Build identity payload without importing mcp or constructing the server
+try:
+    from hermes_cli.profiles import get_active_profile_name as _get_prof
+    profile = str(_get_prof() or 'default')
+except Exception as e:
+    profile = 'default'
+identity = {
+    'schema': 'hermes.identity.v1',
+    'profile': profile,
+    'task_id': os.getenv('HERMES_TASK_ID'),
+    'session_id': os.getenv('HERMES_SESSION_ID'),
+    'turn_id': os.getenv('HERMES_TURN_ID'),
+    'api_request_id': os.getenv('HERMES_API_REQUEST_ID'),
+}
 # Read-only tools list
 readonly_tools = list(sorted(set(m._profile_scoped_exposed_tools())))
 # Qualification summary
