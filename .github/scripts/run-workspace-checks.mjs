@@ -5,7 +5,7 @@
 // plain `check` gives that. This is the same selection rule the old CI matrix
 // used, so the set of commands is unchanged. Only the schedule is different.
 //
-// This is not `npm run --ws check`, because that command is serial and stops
+// This is not `pnpm -r run check`, because that command stops
 // at the first workspace that fails. This runs every unit and fails at the
 // end with the full list.
 //
@@ -14,35 +14,35 @@
 // their lines, and a failure is then hard to read.
 //
 // This also runs on a laptop: `node .github/scripts/run-workspace-checks.mjs`.
+// `--shard I/N` selects every Nth unit (1-based I) so CI can spread the
+// checks across shards without changing what each unit runs.
 // `--concurrency N` sets the limit. `--list` prints the units and exits.
-// `--shard I/N` selects a deterministic round-robin subset for CI matrix jobs.
 
-import { spawn } from 'node:child_process'
-import { globSync, readFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
+import { join, relative } from 'node:path'
 
 const IS_CI = Boolean(process.env.GITHUB_ACTIONS)
-const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const PNPM = 'pnpm'
 
 /** @returns {{pkg: string, script: string}[]} */
 function discoverUnits() {
-  const root = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
-  const workspaceGlobs = Array.isArray(root.workspaces) ? root.workspaces : []
-  /** @type {{location: string, scripts?: Record<string,string>}[]} */
-  const pkgs = workspaceGlobs.flatMap((pattern) => {
-    if (pattern.startsWith('!')) return []
-    const packagePattern = pattern.endsWith('/')
-      ? `${pattern}package.json`
-      : `${pattern}/package.json`
-    return globSync(packagePattern, { nodir: true }).map((path) => ({
-      ...JSON.parse(readFileSync(path, 'utf8')),
-      location: path.replace(/\/package\.json$/, ''),
-    }))
+  const raw = execFileSync(PNPM, ['ls', '--recursive', '--depth', '-1', '--json'], {
+    encoding: 'utf-8',
+    shell: process.platform === 'win32',
   })
+  /** @type {{path: string}[]} */
+  const projects = JSON.parse(raw)
+  const root = process.cwd()
 
   /** @type {{pkg: string, script: string}[]} */
   const units = []
-  for (const pkg of pkgs) {
+  for (const project of projects) {
+    const location = relative(root, project.path).split('\\').join('/')
+    // The root's `check` runs every workspace's check: it is not a unit.
+    if (!location) continue
+    const pkg = { location, ...JSON.parse(readFileSync(join(project.path, 'package.json'), 'utf-8')) }
     const scripts = pkg.scripts || {}
     const subs = Object.keys(scripts).filter((s) => /^check:.+$/.test(s))
     if (subs.length > 0) {
@@ -58,7 +58,7 @@ function discoverUnits() {
 function runUnit(unit) {
   return new Promise((resolve) => {
     const started = Date.now()
-    const child = spawn(NPM, ['run', '--prefix', unit.pkg, unit.script], {
+    const child = spawn(PNPM, ['--dir', unit.pkg, 'run', unit.script], {
       // Buffer, and do not inherit. Children that share one stdout
       // interleave their lines, and a failure is then hard to read.
       stdio: ['ignore', 'pipe', 'pipe'],

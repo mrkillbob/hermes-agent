@@ -129,7 +129,7 @@ jobs:
           cache-node: false
       - name: Install locked chat driver dependencies
         shell: bash
-        run: npm ci --workspace tests-js --include-workspace-root --omit=dev --ignore-scripts --no-audit --no-fund
+        run: pnpm install --frozen-lockfile --filter "{./tests-js}..." --prod --ignore-scripts
       - name: Verify native helpers
         shell: pwsh
         run: |
@@ -219,7 +219,7 @@ jobs:
 
       - name: Install locked chat driver dependencies
         shell: bash
-        run: npm ci --workspace tests-js --include-workspace-root --omit=dev --ignore-scripts --no-audit --no-fund
+        run: pnpm install --frozen-lockfile --filter "{./tests-js}..." --prod --ignore-scripts
 
       # A released tag prints its one-shot chat through prompt_toolkit, whose Windows
       # output object needs a console screen buffer -- piping the CLI's stdout into the
