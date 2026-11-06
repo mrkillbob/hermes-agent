@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 
-import tools.delegate_tool as dt
+from tools.delegate_tool_results import _apply_summary_budget
 
 
 class _FakeCompressor:
@@ -23,7 +23,7 @@ def test_summary_budget_cap_enforced_zero_headroom_sets_truncated_flag(monkeypat
         monkeypatch.setenv("HERMES_HOME", os.path.join(td, ".hermes"))
         big = "X" * 100_000
         results = [{"task_index": 0, "summary": big, "status": "completed"}]
-        dt._apply_summary_budget(results, _FakeParent())
+        _apply_summary_budget(results, _FakeParent())
         assert results[0].get("summary_truncated") is True
         assert len(results[0]["summary"]) < len(big)
         assert results[0].get("summary_full_path")
