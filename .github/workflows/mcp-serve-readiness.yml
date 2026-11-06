@@ -93,3 +93,4 @@ PY
             artifacts/identity.json
             artifacts/qualify.json
           if-no-files-found: error
+          retention-days: 14
