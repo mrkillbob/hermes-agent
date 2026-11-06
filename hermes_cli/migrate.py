@@ -42,7 +42,8 @@ def cmd_migrate_agent(args: Any) -> int:
         extra += ["--source", str(Path(args.source).expanduser())]
     for name in getattr(args, "bot", None) or ():
         extra += ["--bot", name]
-    return migrate_from_agents(get_hermes_home(), args.migrate_agent, tuple(extra))
+    capture_dir = Path(args.capture_dir).expanduser() if getattr(args, "capture_dir", None) else None
+    return migrate_from_agents(get_hermes_home(), args.migrate_agent, tuple(extra), capture_dir=capture_dir)
 
 
 def _fail(message: str) -> int:
