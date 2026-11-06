@@ -34,22 +34,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          tests=(
-            tests/plugins/test_a2a_client_receipts.py
-            tests/plugins/test_a2a_event_limits.py
-            tests/plugins/test_a2a_event_stream.py
-            tests/plugins/test_a2a_forwarded_cancel_retry.py
-            tests/plugins/test_a2a_no_token_guards.py
-            tests/plugins/test_a2a_phase23.py
-            tests/plugins/test_a2a_plugin.py
-            tests/plugins/test_a2a_rejected_resend.py
-            tests/plugins/test_a2a_tools_gate.py
-            tests/gateway/test_session_a2a.py
-            tests/gateway/test_session_a2a_events.py
-            tests/hermes_state/test_a2a_event_tasks.py
-            tests/tools/test_a2a_reason_roundtrip.py
-          )
-          scripts/run_tests.sh "${tests[@]}" -q | tee artifacts/tests.log
+          # Discover available durability tests in this fork
+          mapfile -t tests < <(git ls-files \
+            'tests/**/test_*a2a*.py' \
+            'tests/gateway/test_session_a2a*.py' \
+            'tests/hermes_state/test_a2a_*.py' \
+            'tests/tools/test_a2a_*.py' 2>/dev/null || true)
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "No A2A durability tests found; exiting with failure to surface misconfiguration." | tee artifacts/tests.log
+            exit 1
+          fi
+          echo "Running ${#tests[@]} durability tests:" | tee artifacts/tests.log
+          printf ' - %s\n' "${tests[@]}" | tee -a artifacts/tests.log
+          scripts/run_tests.sh "${tests[@]}" -q | tee -a artifacts/tests.log
 
       - name: Dump hermes-identity handshake and qualification JSON
         run: |
