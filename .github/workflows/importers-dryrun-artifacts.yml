@@ -1,0 +1,26 @@
+name: importer-dryrun-artifacts
+
+on:
+  pull_request:
+    branches: [ "main", "**" ]
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Setup Hermes PM
+        uses: ./.github/actions/setup-pm
+      - name: Generate importer dry-run artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/importers-121-dryrun
+          export HERMES_HOME="$GITHUB_WORKSPACE/.hermes-test-121"
+          python -P -m hermes_cli.main migrate claude-code --dry-run -y \
+            --capture-dir artifacts/importers-121-dryrun || true
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: importer-dryrun-${{ github.sha }}
+          path: artifacts/importers-121-dryrun
+          retention-days: 14

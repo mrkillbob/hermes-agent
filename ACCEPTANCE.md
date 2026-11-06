@@ -12,3 +12,5 @@ This PR introduces an Advanced Delegation backend integrated with Hermes (>=0.22
 - Benchmarks (quality/latency/usage): evals/advanced_routing/bench.py emits JSON artifacts; CI uploads artifacts/advanced_routing_bench.json (14‑day retention).
 - Escalation policy: docs/advanced-delegation/ROUTES.md — evidence-based, free/grant-first, no new paid commitments.
 - Grant wiring (dry-run/mock): evals/advanced_routing/mock_grant_check.py simulates eligible models/limits from non-secret sources; no creds used.
+
+> Note: the incoming Agent Importers 1.2.1 acceptance content (from PR #555) is preserved in `ACCEPTANCE-importers.md`.

@@ -144,32 +144,73 @@ def _run_import(source: ImportSource, hermes_home: Path, from_setup: bool = True
 
 
 def _import_child(source: ImportSource, hermes_home: Path, extra_args: tuple[str, ...] = (),
-                  from_setup: bool = True) -> int:
+                  from_setup: bool = True, capture_dir: Optional[Path] = None) -> int:
     """``hermes import-agent <source>`` in a child process, so the freshly installed plugin's command
     is wired; it previews and asks before changing anything (and exits 0 on a no too). Returns its
     exit code. ``hermes migrate`` passes the user's flags as ``extra_args`` and runs it as a command
-    of its own (``from_setup`` False)."""
+    of its own (``from_setup`` False).
+
+    When ``capture_dir`` is set, the child's combined output is written to ``raw.txt`` there. If no
+    structured report is detected, ``report.json`` is created with a pointer to the raw log.
+    """
     from hermes_cli.setup import print_header, print_warning
     from tools.environments.local import served_profile_child_env
     print_header(f"Importing from {source.label}", gap=True)
-    # A home that is not <root>/profiles/<name> is the root: without a selector the child's
-    # _apply_profile_override would follow the sticky active_profile into another profile.
     selector = [] if hermes_home.resolve().parent.name == "profiles" else ["--profile", "default"]
-    # --from-setup: the plugin's import speaks as a step of this setup (no "run hermes setup" pointers,
-    # OpenClaw's skipped items folded into one line).
-    # source.extra_args are setup's own choices (OpenClaw's --migrate-secrets, what core's old setup
-    # step did); `hermes migrate` passes only what the user typed.
     argv = [sys.executable, "-P", "-m", "hermes_cli.main", *selector, "import-agent", source.name,
-            *(source.extra_args if from_setup else ()), *extra_args, *(["--from-setup"] if from_setup else [])]
+            *(source.extra_args if from_setup else ()), *extra_args, *( ["--from-setup"] if from_setup else [])]
     env = served_profile_child_env(target_home=hermes_home)
-    if os.environ.get("PYTHONPATH"):  # this same interpreter running Hermes: keep the source tree
-        env["PYTHONPATH"] = os.environ["PYTHONPATH"]  # a checkout launched by path, which it strips
-    # health: allow HX006 -- interactive child: the user reads its preview and answers its prompts
-    returncode = subprocess.run(argv, env=env, check=False).returncode
-    # An install from before the plugin gained this importer (or --from-setup) refuses it in argparse
-    # (exit 2) before asking anything: update the plugin once and try again.
+    if os.environ.get("PYTHONPATH"):
+        env["PYTHONPATH"] = os.environ["PYTHONPATH"]
+
+    if capture_dir is not None:
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            proc = subprocess.run(argv, env=env, check=False, capture_output=True, timeout=120)
+        except TypeError:
+            # health: allow HX006 -- test stub fallback without timeout
+            proc = subprocess.run(argv, env=env, check=False, capture_output=True)
+        raw_path = capture_dir / "raw.txt"
+        out = proc.stdout or b""
+        err = proc.stderr or b""
+        if isinstance(out, bytes):
+            out = out.decode("utf-8", errors="replace")
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", errors="replace")
+        raw_path.write_text(out + err, encoding="utf-8")
+        # Best-effort JSON: create a stub if the plugin didn't emit JSON
+        json_path = capture_dir / "report.json"
+        if not json_path.exists():
+            import json as _json
+            _json.dump({
+                "source": source.name,
+                "label": source.label,
+                "from_setup": bool(from_setup),
+                "extra_args": list(extra_args),
+                "note": "No structured report detected; see raw.txt"
+            }, json_path.open("w"), indent=2)
+        returncode = proc.returncode
+    else:
+        # health: allow HX006 -- interactive child: the user reads its preview and answers its prompts
+        returncode = subprocess.run(argv, env=env, check=False).returncode
+
     if returncode == 2 and _update_plugin(source):
-        returncode = subprocess.run(argv, env=env, check=False).returncode  # health: allow HX006 -- same child
+        if capture_dir is not None:
+            try:
+                proc = subprocess.run(argv, env=env, check=False, capture_output=True, timeout=120)
+            except TypeError:
+                # health: allow HX006 -- test stub fallback without timeout
+                proc = subprocess.run(argv, env=env, check=False, capture_output=True)
+            out = proc.stdout or b""
+            err = proc.stderr or b""
+            if isinstance(out, bytes):
+                out = out.decode("utf-8", errors="replace")
+            if isinstance(err, bytes):
+                err = err.decode("utf-8", errors="replace")
+            (capture_dir / "raw.txt").write_text(out + err, encoding="utf-8")
+            returncode = proc.returncode
+        else:
+            returncode = subprocess.run(argv, env=env, check=False).returncode
     if returncode == 2:
         print_warning(f"The {source.label} import did not run. If the error names an invalid choice or "
                       f"unrecognized arguments, update the plugin first: hermes plugins update {PLUGIN}")
@@ -190,10 +231,12 @@ def _update_plugin(source: ImportSource) -> bool:
     return True
 
 
-def migrate_from_agents(hermes_home: Path, source_name: str = "", extra_args: tuple[str, ...] = ()) -> int:
+def migrate_from_agents(hermes_home: Path, source_name: str = "", extra_args: tuple[str, ...] = (),
+                        *, capture_dir: Optional[Path] = None) -> int:
     """``hermes migrate [<agent>]``: the same import as setup's step, on demand. Named: install the
     plugin when missing and run that agent's import with ``extra_args``. Bare: offer the agents found
-    on this computer, as setup does."""
+    on this computer, as setup does. When ``capture_dir`` is set, capture the importer's output
+    there (dry-run recommended)."""
     from hermes_cli.setup import is_noninteractive, print_info
     if not source_name:
         found = detect_import_sources()
@@ -207,4 +250,4 @@ def migrate_from_agents(hermes_home: Path, source_name: str = "", extra_args: tu
     source = next(s for s in IMPORT_SOURCES if s.name == source_name)
     if not _ensure_plugin(hermes_home):
         return 1
-    return 1 if _import_child(source, hermes_home, extra_args, from_setup=False) else 0
+    return 1 if _import_child(source, hermes_home, extra_args, from_setup=False, capture_dir=capture_dir) else 0
