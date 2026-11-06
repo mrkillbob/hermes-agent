@@ -150,6 +150,36 @@ This entry uses the existing catalog setup and storage behavior. It is
 separate from the retired `n8n` bridge, so existing connections, credentials,
 installed files, and tool selections are not replaced.
 
+### Hermes identity for A2A routing
+
+Hermes’ built-in hermes-tools MCP server exposes a read-only resource named `hermes-identity`
+(`hermes://identity`). Clients can read it at connect time to learn stable routing IDs:
+profile, task_id, session_id, turn_id, and api_request_id. Forward these with tool calls
+(e.g., via your runtime’s per-call metadata or by setting the environment variables
+HERMES_TASK_ID, HERMES_SESSION_ID, HERMES_TURN_ID, HERMES_API_REQUEST_ID) so Hermes can
+preserve durable delivery/ACK and profile-aware routing in A2A bridges.
+
+### A2A discovery via MCP resources
+
+The same server also publishes two optional, read-only resources to help A2A-aware runtimes pick
+where to send work:
+
+- `hermes-a2a-peers` (`hermes://a2a-peers`) — Configured peers from `a2a_agents` in your
+  `config.yaml` (name, url, capabilities, tenant). Use this to present a peer picker and to see
+  profile routing embedded in a peer URL (`/p/<profile>`).
+- `hermes-a2a-conversations` (`hermes://a2a-conversations`) — A subset of locally persisted A2A
+  `context_id` values. Use this to continue a prior exchange when delegating via A2A.
+
+Example payloads:
+
+```
+{ "schema": "hermes.a2a.peers.v1", "peers": [
+  {"name":"researcher","url":"http://box:9900","capabilities":["web_search"],"tenant":"acme"}
+]}
+
+{ "schema": "hermes.a2a.conversations.v1", "context_ids": ["ctx-1","ctx-2"] }
+```
+
 ### Tool selection at install time
 
 After credentials are configured, Hermes probes the MCP server to list every

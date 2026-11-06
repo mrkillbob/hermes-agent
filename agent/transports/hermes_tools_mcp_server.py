@@ -66,6 +66,30 @@ EXPOSED_TOOLS: tuple[str, ...] = (
     "kanban_create", "kanban_unblock", "kanban_link",
 )
 
+def _active_profile_name() -> str:
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        return str(get_active_profile_name() or "default")
+    except Exception:
+        logger.exception("failed to read active profile for MCP server; defaulting to 'default'")  # health: allow BLE001 -- boundary logs and falls back safely
+        return "default"
+
+
+def _profile_scoped_exposed_tools() -> tuple[str, ...]:
+    """Profile-aware exposed tool selection.
+
+    For security hardening, a profile may enforce a read-only subset for this MCP server.
+    The test profile policy: only web_search, web_extract, vision_analyze, skills_list, skill_view.
+    Additionally, when HERMES_MCP_READONLY is set (any truthy value), enforce the same subset.
+    """
+    profile = _active_profile_name().strip().lower()
+    readonly_flag = str(os.environ.get("HERMES_MCP_READONLY", "")).strip().lower()  # health: allow HX002 -- profile-scoped safety gate; env is a compatibility override, not config
+    readonly = readonly_flag in {"1", "true", "yes", "on"} or profile in {"test", "a2a-test"}
+    if not readonly:
+        return EXPOSED_TOOLS
+    readonly_allow = ("web_search", "web_extract", "vision_analyze", "skills_list", "skill_view")
+    return readonly_allow
+
 
 def _build_server() -> Any:
     """Create the MCP server with Hermes tools attached (lazy imports: importable without ``mcp``)."""
@@ -84,7 +108,12 @@ def _build_server() -> Any:
             "session. Use these for capabilities Codex's built-in toolset "
             "doesn't cover: web search/extract, "
             "subagent delegation, vision, image generation, persistent "
-            "memory, skills, and cross-session search."
+            "memory, skills, and cross-session search. "
+            "Forward stable routing IDs (task/session/turn/request) to Hermes: "
+            "read the 'hermes-identity' resource and include those IDs in your runtime, "
+            "or set HERMES_TASK_ID/HERMES_SESSION_ID/HERMES_TURN_ID/HERMES_API_REQUEST_ID in the environment. "
+            "A2A-aware clients can also read 'hermes-a2a-peers' and 'hermes-a2a-conversations' "
+            "to select a target peer/profile and continue a saved context."
         ),
     )
 
@@ -102,7 +131,16 @@ def _build_server() -> Any:
         def _dispatch(**kwargs: Any) -> str:
             try:
                 # Drop None so unset optionals aren't forwarded to the handler.
-                return handle_function_call(tool_name, {k: v for k, v in kwargs.items() if v is not None})
+                args = {k: v for k, v in kwargs.items() if v is not None}
+                # Propagate stable IDs when the MCP client provides them via env; noop when unset.
+                task_id = os.getenv("HERMES_TASK_ID") or None  # health: allow HX002 -- correlation IDs only
+                session_id = os.getenv("HERMES_SESSION_ID") or None  # health: allow HX002 -- correlation IDs only
+                turn_id = os.getenv("HERMES_TURN_ID") or None  # health: allow HX002 -- correlation IDs only
+                api_request_id = os.getenv("HERMES_API_REQUEST_ID") or None  # health: allow HX002 -- correlation IDs only
+                return handle_function_call(
+                    tool_name, args, task_id=task_id, session_id=session_id,
+                    turn_id=turn_id, api_request_id=api_request_id,
+                )
             except Exception as exc:
                 logger.exception("tool %s raised", tool_name)
                 return json.dumps({"error": str(exc), "tool": tool_name})
@@ -113,8 +151,88 @@ def _build_server() -> Any:
         _dispatch.__annotations__ = {**annots, "return": str}
         return _dispatch
 
+    # Expose a read-only identity resource so MCP clients can discover Hermes routing IDs at handshake time.
+    def _identity_payload() -> dict[str, str | None]:
+        try:
+            from hermes_cli.profiles import get_active_profile_name as _get_prof
+            profile = str(_get_prof() or "default")
+        except Exception:
+            logger.exception("failed to read active profile for MCP identity; defaulting to 'default'")  # health: allow BLE001 -- boundary logs and falls back safely
+            profile = "default"
+        return {
+            "schema": "hermes.identity.v1",
+            "profile": profile,
+            "task_id": os.getenv("HERMES_TASK_ID"),  # health: allow HX002 -- correlation IDs propagated via env when present
+            "session_id": os.getenv("HERMES_SESSION_ID"),  # health: allow HX002 -- correlation IDs propagated via env when present
+            "turn_id": os.getenv("HERMES_TURN_ID"),  # health: allow HX002 -- correlation IDs propagated via env when present
+            "api_request_id": os.getenv("HERMES_API_REQUEST_ID"),  # health: allow HX002 -- correlation IDs propagated via env when present
+        }
+
+    try:
+        # Newer SDKs: decorator-style resource registration
+        mcp.resource("hermes://identity", name="hermes-identity",
+                     description="Active Hermes routing identity (profile, task/session/turn/request IDs)")(_identity_payload)
+    except (AttributeError, TypeError):
+        try:
+            # Older SDKs may expose an add_resource API (mirrors add_tool fallback above)
+            mcp.add_resource(_identity_payload, uri="hermes://identity", name="hermes-identity",
+                             description="Active Hermes routing identity (profile, task/session/turn/request IDs)")
+        except (AttributeError, TypeError):
+            logger.debug("hermes-tools MCP: failed to register identity resource; continuing with tools only")
+
+    # A2A peer discovery: read-only snapshot of configured peers (name, url, capabilities, tenant)
+    def _a2a_peers_payload() -> dict[str, object]:
+        try:
+            from hermes_cli.config import load_config_readonly
+            cfg = load_config_readonly() or {}
+            peers = []
+            for name, entry in (cfg.get("a2a_agents") or {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                peers.append({
+                    "name": name,
+                    "url": entry.get("url") or "",
+                    "capabilities": list(entry.get("capabilities") or []),
+                    "tenant": entry.get("tenant") or "",
+                })
+            return {"schema": "hermes.a2a.peers.v1", "peers": peers}
+        except Exception:
+            logger.exception("failed to read configured A2A peers")  # health: allow BLE001 -- boundary logs and returns empty payload
+            return {"schema": "hermes.a2a.peers.v1", "peers": []}
+
+    try:
+        mcp.resource("hermes://a2a-peers", name="hermes-a2a-peers",
+                     description="Configured A2A peers (name, url, capabilities, tenant)")(_a2a_peers_payload)
+    except (AttributeError, TypeError):
+        try:
+            mcp.add_resource(_a2a_peers_payload, uri="hermes://a2a-peers", name="hermes-a2a-peers",
+                             description="Configured A2A peers (name, url, capabilities, tenant)")
+        except (AttributeError, TypeError):
+            logger.debug("hermes-tools MCP: failed to register a2a-peers resource")
+
+    # A2A conversations: list persisted local context ids (for selection/continuation)
+    def _a2a_conversations_payload() -> dict[str, object]:
+        try:
+            from plugins.platforms.a2a import protocol as _a2a_proto
+            convos = list(_a2a_proto.list_conversations() or [])
+            return {"schema": "hermes.a2a.conversations.v1", "context_ids": convos[:500]}
+        except Exception:
+            logger.exception("failed to read A2A conversations")  # health: allow BLE001 -- boundary logs and returns empty payload
+            return {"schema": "hermes.a2a.conversations.v1", "context_ids": []}
+
+    try:
+        mcp.resource("hermes://a2a-conversations", name="hermes-a2a-conversations",
+                     description="Persisted local A2A conversation context IDs (subset)")(_a2a_conversations_payload)
+    except (AttributeError, TypeError):
+        try:
+            mcp.add_resource(_a2a_conversations_payload, uri="hermes://a2a-conversations", name="hermes-a2a-conversations",
+                             description="Persisted local A2A conversation context IDs (subset)")
+        except (AttributeError, TypeError):
+            logger.debug("hermes-tools MCP: failed to register a2a-conversations resource")
+
+    exposed = _profile_scoped_exposed_tools()
     exposed_count = 0
-    for name in EXPOSED_TOOLS:
+    for name in exposed:
         spec = all_defs.get(name)
         if spec is None:
             logger.debug("skipping %s — not registered in this Hermes process", name)
@@ -128,7 +246,7 @@ def _build_server() -> Any:
             mcp.tool(name=name, description=description)(_make_handler(name, params_schema, description))
         exposed_count += 1
 
-    logger.info("hermes-tools MCP server registered %d/%d tools", exposed_count, len(EXPOSED_TOOLS))
+    logger.info("hermes-tools MCP server registered %d/%d tools (profile=%s)", exposed_count, len(exposed), _active_profile_name())
     return mcp
 
 
