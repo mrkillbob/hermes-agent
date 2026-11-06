@@ -20,9 +20,9 @@ def _read_usage_cache(path: str | None) -> dict[str, Any]:
         p = Path(path).expanduser()
         if not p.is_file():
             return {}
-        with p.open("r", encoding="utf-8") as fh:
+        with p.open("r", encoding="utf-8-sig") as fh:
             return json.load(fh) or {}
-    except Exception:
+    except (OSError, json.JSONDecodeError, ValueError):
         return {}
 
 
@@ -98,7 +98,7 @@ class AdvancedRoutingProvider(DelegationProvider):
         try:
             if int(remaining) > 0:
                 return True, None
-        except Exception:
+        except (ValueError, TypeError):
             return True, None
         return False, f"Budget exhausted for {key}"
 
