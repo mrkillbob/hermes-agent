@@ -1,0 +1,64 @@
+name: mcp-serve-readiness
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'agent/transports/hermes_tools_mcp_server.py'
+      - 'plugin-catalog/mcp-serve.yaml'
+      - 'tests/**'
+      - '.github/workflows/mcp-serve-readiness.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  durability-and-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+
+      - name: Setup Hermes PM environment
+        uses: ./.github/actions/setup-pm
+
+
+      - name: Run A2A durability suite (subset)
+        env:
+          TZ: UTC
+          LANG: C.UTF-8
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          # Discover available durability tests in this fork
+          mapfile -t tests < <(git ls-files \
+            'tests/**/test_*a2a*.py' \
+            'tests/gateway/test_session_a2a*.py' \
+            'tests/hermes_state/test_a2a_*.py' \
+            'tests/tools/test_a2a_*.py' 2>/dev/null || true)
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "No A2A durability tests found; marking check as skipped." | tee artifacts/tests.log
+            exit 0
+          fi
+          echo "Running ${#tests[@]} durability tests:" | tee artifacts/tests.log
+          printf ' - %s\n' "${tests[@]}" | tee -a artifacts/tests.log
+          scripts/run_tests.sh "${tests[@]}" -q | tee -a artifacts/tests.log
+
+      - name: Dump hermes-identity handshake and qualification JSON
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          python3 -c "import json, os, importlib; os.environ['HERMES_MCP_READONLY']='1'; m=importlib.import_module('agent.transports.hermes_tools_mcp_server');\nfrom importlib import import_module as _imp;\ntry:\n    _get_prof=_imp('hermes_cli.profiles').get_active_profile_name; profile=str(_get_prof() or 'default')\nexcept Exception:\n    profile='default'\nidentity={'schema':'hermes.identity.v1','profile':profile,'task_id':os.getenv('HERMES_TASK_ID'),'session_id':os.getenv('HERMES_SESSION_ID'),'turn_id':os.getenv('HERMES_TURN_ID'),'api_request_id':os.getenv('HERMES_API_REQUEST_ID')};\nopen('artifacts/identity.json','w').write(json.dumps(identity, indent=2));\nreadonly_tools=sorted(set(m._profile_scoped_exposed_tools()));\nqual={'schema':'hermes.mcp.serve.qualify.v1','pin':'1.0.0','readonly_tools':readonly_tools,'notes':['Approvals disabled; ESTOP preserved','Profile-scoped allowlist active when profile in {test, a2a-test} or HERMES_MCP_READONLY=1']};\nopen('artifacts/qualify.json','w').write(json.dumps(qual, indent=2));\nprint('Wrote artifacts/identity.json and artifacts/qualify.json')"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hermes-mcp-serve-readiness-${{ github.run_id }}
+          path: |
+            artifacts/tests.log
+            artifacts/identity.json
+            artifacts/qualify.json
+          if-no-files-found: error
+          retention-days: 14

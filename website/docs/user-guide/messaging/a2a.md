@@ -64,6 +64,12 @@ a2a_agents:
 
 Then just ask: *"Ask the researcher agent to summarize today's arXiv postings."* Direct URLs work too — `a2a_call` accepts any A2A endpoint.
 
+### Selecting a Hermes peer profile and conversation
+
+- To target a specific profile on a Hermes peer, append `/p/<profile>` to its base URL in `a2a_agents.*.url` (for example, `http://box:9900/p/test`). The server’s multiplex mirror serves the same A2A surface per profile.
+- To continue a specific conversation on the peer, pass `context_id` to `a2a_call`. The peer’s A2A adapter keys multi‑turn exchanges by `contextId` and persists transcripts across restarts.
+- MCP clients: read the built‑in `hermes-identity` resource from the `hermes-tools` MCP server to get stable routing IDs (profile, task/session/turn/request) and forward them along with A2A calls so Hermes can preserve durable delivery/ACK and profile‑aware routing. For peer/continuation selection, also read `hermes-a2a-peers` and `hermes-a2a-conversations`.
+
 ## Inbound: being callable
 
 With the platform enabled, Hermes serves:

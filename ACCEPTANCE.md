@@ -14,3 +14,4 @@ This PR introduces an Advanced Delegation backend integrated with Hermes (>=0.22
 - Grant wiring (dry-run/mock): evals/advanced_routing/mock_grant_check.py simulates eligible models/limits from non-secret sources; no creds used.
 
 > Note: the incoming Agent Importers 1.2.1 acceptance content (from PR #555) is preserved in `ACCEPTANCE-importers.md`.
+> Note: the incoming Hermes MCP-serve A2A readiness acceptance content (from PR #553) is preserved in `ACCEPTANCE-mcp-serve.md`.
