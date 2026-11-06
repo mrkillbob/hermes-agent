@@ -17,13 +17,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pytest
-      - name: Unit tests (advanced routing only)
-        run: pytest -q tests/tools/test_delegation_advanced_routing.py
+      - name: Unit tests (advanced routing + budget cap)
+        run: pytest -q tests/tools/test_delegation_advanced_routing.py tests/tools/test_delegate_summary_budget_cap_enforced_small.py
       - name: Run representative benchmark
         run: |
           python evals/advanced_routing/bench.py
+      - name: Verify grants mock (non-secret)
+        run: |
+          mkdir -p artifacts
+          python evals/advanced_routing/mock_grant_check.py > artifacts/mock_grant_check.json
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: advanced-delegation-bench
-          path: artifacts/advanced_routing_bench.json
+          path: artifacts
+          retention-days: 14
