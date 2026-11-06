@@ -11,8 +11,7 @@
 
 > **Intel Macs:** the `Hermes-Setup.dmg` bootstrap installer is built for
 > Apple Silicon (arm64) only, so on an Intel Mac it reports "not supported on
-> this Mac". Stable releases build the native `darwin-x64` bundle only when
-> cut with `--with macos-intel`; otherwise install the
+> this Mac". No release builds a native `darwin-x64` bundle; install the
 > [CLI](../../README.md) and run `hermes desktop`. See
 > [Platform Support](../../website/docs/getting-started/platform-support.md#build-targets-and-support-priority).
 
@@ -85,34 +84,28 @@ shortcut helper. Prebuilt installers include it; no compiler is needed at runtim
 Want to hack on the app itself? Install workspace deps from the repo root once, then run the dev server from this directory:
 
 ```bash
-npm run install:desktop  # from repo root — locked Desktop/TUI/web workspace union
+pnpm install         # from repo root — links apps/desktop, web, apps/shared
 cd apps/desktop
-npm run dev          # Vite renderer + Electron, which boots the Python backend
+pnpm run dev         # Vite renderer + Electron, which boots the Python backend
 ```
-
-The canonical installer controls get-windows source compilation with node-gyp 13.0.2.
-Bare, unwrapped `npm install` or `npm ci` is outside this Desktop compiler guarantee:
-npm can replace the project compiler with its bundled version during dependency scripts.
-The installer verifies the actual Windows x64 binding before publishing or reusing
-a completed preparation receipt. Linux and Windows ARM64 keep their optional native behavior.
 
 Point the app at a specific source checkout, or sandbox it away from your real config:
 
 ```bash
 # throwaway HERMES_HOME, separate Electron userData, distinct app name to avoid the single-instance lock
-../../scripts/dev-sandbox.sh npm run dev
-HERMES_DESKTOP_HERMES_ROOT=/path/to/clone npm run dev
-HERMES_HOME=$HOME/.hermes/cache/scratch/throwaway npm run dev
-npm run dev:fake-boot   # exercise the startup overlay with deterministic delays
+../../scripts/dev-sandbox.sh pnpm run dev
+HERMES_DESKTOP_HERMES_ROOT=/path/to/clone pnpm run dev
+HERMES_HOME=$HOME/.hermes/cache/scratch/throwaway pnpm run dev
+pnpm run dev:fake-boot   # exercise the startup overlay with deterministic delays
 ```
 
 ### Building installers
 
 ```bash
-npm run dist:mac     # DMG + zip
-npm run dist:win     # MSIX
-npm run dist:linux   # AppImage + deb + rpm
-npm run pack         # unpacked app under release/ (no installer)
+pnpm run dist:mac     # DMG + zip
+pnpm run dist:win     # MSIX
+pnpm run dist:linux   # AppImage + deb + rpm
+pnpm run pack         # unpacked app under release/ (no installer)
 ```
 
 These are ordinary packaging commands, not complete tagged payload builds.
@@ -224,14 +217,14 @@ and retained background sockets continue receiving events from running jobs.
 Run before opening a PR (lint may surface pre-existing warnings but must exit cleanly):
 
 ```bash
-npm run fix
-npm run typecheck
-npm run lint
-npm run test:ui
-npm run test:desktop:platforms
+pnpm run fix
+pnpm run typecheck
+pnpm run lint
+pnpm run test:ui
+pnpm run test:desktop:platforms
 ```
 
-Run `npm run test:desktop:all` for install, boot, update, packaging, or other
+Run `pnpm run test:desktop:all` for install, boot, update, packaging, or other
 release-path changes.
 
 ### Troubleshooting

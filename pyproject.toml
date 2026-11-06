@@ -138,8 +138,7 @@ dependencies = [
   # wrapper over it). Pure Python, and its pins match Pillow/websockets above,
   # so it rides in the main venv and every install, Desktop bundle included,
   # ships it without a separate tool environment.
-  # Reviewed Pillow 13 compatibility correction; retain upstream history.
-  "browser-harness @ git+https://github.com/mrkillbob/browser-harness.git@07378b2e6518f5b3cfdf20991cf8d7a50217400b ; python_version >= '3.14'",
+  "browser-harness==0.1.13; python_version >= '3.14'",
   # .gitignore-aware file matching for desktop build stamp.
   "pathspec==1.1.1; python_version >= '3.14'",
   "fastapi>=0.104.0,<1; python_version >= '3.14'",
@@ -276,7 +275,7 @@ messaging = [
   "slack-bolt==1.30.0",
   "slack-sdk==3.45.0",
   "qrcode==7.4.2",
-] # aiohttp 3.14.5: prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7/GHSA-2g87-pp6c-29x5/GHSA-494j-54xm-rwp3/GHSA-5wr8-gcqf-gqf3
+] # aiohttp 3.14.5: prior CVEs + GHSA-9xw5-w5jj-pvcg/GHSA-2g87-pp6c-29x5/GHSA-5wr8-gcqf-gqf3 family
 cron = [] # croniter is now a core dependency; this extra kept for back-compat
 slack = ["slack-bolt==1.30.0", "slack-sdk==3.45.0", "aiohttp==3.14.5"]
 # Matrix gateway deps. `mautrix[encryption]` pulls `python-olm`, whose
@@ -292,7 +291,7 @@ matrix = [
   "asyncpg==0.32.0; sys_platform == 'linux'",
   "aiohttp-socks==0.12.0; sys_platform == 'linux'",
   "aiohttp==3.14.5; sys_platform == 'linux'",
-] # aiohttp 3.14.5: prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7/GHSA-2g87-pp6c-29x5/GHSA-494j-54xm-rwp3/GHSA-5wr8-gcqf-gqf3 (mautrix/aiohttp-socks only cap aiohttp<4 / >=3.10, so pin the patched floor directly)
+] # aiohttp 3.14.5: prior CVEs + GHSA-9xw5-w5jj-pvcg/GHSA-2g87-pp6c-29x5/GHSA-5wr8-gcqf-gqf3 family (mautrix/aiohttp-socks only cap aiohttp<4 / >=3.10, so pin the patched floor directly)
 
 # WeCom callback-mode adapter — parses untrusted XML POST bodies from
 # WeCom-controlled callback endpoints, so we use defusedxml (drop-in
@@ -383,7 +382,7 @@ documents = [
   "openpyxl==3.1.5",
   "python-pptx==1.0.2",
   "reportlab==5.1.0",
-  "pypdf==6.21.2",
+  "pypdf==6.21.4",
 ]
 # PDF text extraction and rasterization for skills/productivity/pdf. Only in
 # the skills' side environment (`hermes pm environment documents --extra
@@ -433,7 +432,7 @@ sms = ["aiohttp==3.14.5"]
 teams = [
   "microsoft-teams-apps==2.1.1",
   "aiohttp==3.14.5",
-] # aiohttp 3.14.5: prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7/GHSA-2g87-pp6c-29x5/GHSA-494j-54xm-rwp3/GHSA-5wr8-gcqf-gqf3
+] # aiohttp 3.14.5: prior CVEs + GHSA-9xw5-w5jj-pvcg/GHSA-2g87-pp6c-29x5/GHSA-5wr8-gcqf-gqf3 family
 # Computer use talks to PM's pinned cua-driver over MCP stdio. This extra
 # provides the MCP client, independently of the native driver package.
 computer-use = [
@@ -461,8 +460,6 @@ otlp = [
   "opentelemetry-sdk==1.45.1",
   "opentelemetry-exporter-otlp-proto-http==1.45.1",
 ]
-# Retain the bundled opt-in plugin until its separate catalog admission.
-langfuse = ["langfuse==4.15.2"]
 bedrock = ["boto3==1.43.115"]
 vertex = ["google-auth==2.62.0"]
 azure-identity = ["azure-identity==1.26.0"]
@@ -498,15 +495,12 @@ google = [
   "google-auth==2.62.0",
   "google-auth-oauthlib==1.5.0",
   "google-auth-httplib2==0.4.4",
-  # OAuthlib 4 removes JSONP revocation and fixes PKCE comparisons
-  # (CVE-2026-49264, CVE-2026-49265); pin unlocked Google installs too.
-  "oauthlib==4.0.0",
   # The Google SDKs permit older vulnerable transitives, so unlocked installs
   # must carry the same fixed floors as uv.lock and the runtime installers:
   # httplib2 0.32.0 (GHSA-j5g9-f88f-gfj3 decompression bomb DoS),
-  # pyasn1 0.6.4, google-auth 2.55.1.
+  # pyasn1 0.6.5, google-auth 2.55.1.
   "httplib2==0.32.0",
-  "pyasn1==0.6.4",
+  "pyasn1==0.6.5",
 ]
 youtube = [
   # Required by skills/media/youtube-content and
@@ -572,14 +566,13 @@ dev = [
   "ty==0.0.89",
   "ruff==0.15.22",
   "setuptools==84.1.0",
-] # starlette: CVE-2026-48710; setuptools: >=84.1.0 fixes GHSA-xmj3-9gf7-h52w
+] # starlette: CVE-2026-48710; setuptools: 84.1.0 (GHSA-xmj3-9gf7-h52w; torch >=2.13 requires setuptools 83+)
 # Native launcher and provider-catalog E2E dependencies belong in the test
 # environment, not the core runtime. Keep the Anthropic SDK at the same
 # reviewed version as the optional runtime extra above.
 test = [
   "distlib==0.4.4; sys_platform == 'win32'",
   "anthropic==0.125.0",
-  "pyyaml==6.0.3",
 ]
 
 [build-system]
@@ -587,7 +580,7 @@ test = [
 # PEP 517 isolated builds. Without wheel in
 # requires, the isolation sandbox only gets setuptools and the build
 # fails with ModuleNotFoundError: wheel.cli (#96488).
-requires = ["setuptools==84.1.0", "wheel>=0.46.1,<0.48"]
+requires = ["setuptools==84.1.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
@@ -639,14 +632,6 @@ default-groups = []
 # covers 3.14 only. Without this the lock must resolve every supported version,
 # where extras that only ever coexist on 3.14 (kittentts vs neutts) conflict.
 environments = ["python_version >= '3.14'"]
-constraint-dependencies = [
-  # Keep both torch and huggingface-hub above the filelock advisory range.
-  "filelock>=4.2.1,<5",
-  # PTB's optional webhooks server needs the header-folding and chunked-body fixes.
-  "tornado>=6.6,<7",
-  # GHSA-54p9-h82j-f925: release item-set operands after union/subtraction.
-  "multidict==6.9.1",
-]
 override-dependencies = [
   # discord.py's latest published version, 2.7.1, pins pynacl at <1.6. however, pynacl 1.5.0 has known vulnerabilities.
   # discord.py has updated pynacl to 1.6 on `main`, but has not yet published a patch release.
@@ -687,8 +672,12 @@ override-dependencies = [
 # check), never on users' machines: PM installs from this vetted lock and drops the
 # cutoff from what it generates (pm/workspace.py::_trust_core_lock), because many
 # package mirrors publish no upload times and uv rejects a file it cannot date
-# (#135589). Exact pins follow the same 3-day rule.
+# (#135589). Exact pins follow the same 3-day rule. The one exemption is CA
+# trust stores: a release that revokes or distrusts a compromised CA must reach
+# the lock the day it ships, because holding it back keeps the bad root trusted.
+# Only packages whose job is CA trust belong in exclude-newer-package.
 exclude-newer = "3 days"
+exclude-newer-package = { certifi = false }
 
 [tool.setuptools]
 # Root single-file modules are derived by setup.py at build time from the
@@ -749,17 +738,6 @@ pm = ["lock.json", "artifact-mirror.json", "pyproject.toml", "uv.lock"]
 # Bot Desktop starts Xvnc + Xfce through a shell launcher and seeds the wallpaper; both are read
 # via Path(__file__).parent in tools/bot_desktop/runtime.py and vanish from sealed wheels otherwise.
 tools = ["bot_desktop/launcher.sh", "bot_desktop/wallpaper.png"]
-
-[tool.setuptools.data-files]
-# Federation is a checked-in, user-auditable manifest rather than Python
-# code. Install it beside the environment so the CLI remains functional from
-# a wheel as well as from a source checkout.
-"configs/federation" = ["configs/federation/roles.json"]
-# The curated catalog is bare YAML data, not a Python package. Keep it in
-# sealed installs so plugin removal entries remain enforceable offline.
-# data-files sources are project-root-relative, unlike package-data's
-# package-relative globs, so this must carry the directory prefix.
-"plugin-catalog" = ["plugin-catalog/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

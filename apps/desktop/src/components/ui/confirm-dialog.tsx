@@ -62,6 +62,7 @@ export function ConfirmDialog({
   const confirmRef = useRef<HTMLButtonElement>(null)
   const closeTimerRef = useRef<null | number>(null)
   const lifetimeRef = useRef<null | symbol>(null)
+  const unmountedRef = useRef(false)
   const [status, setStatus] = useState<'done' | 'idle' | 'saving'>('idle')
   const [error, setError] = useState<null | string>(null)
   const busy = status === 'saving' || status === 'done'
@@ -82,8 +83,24 @@ export function ConfirmDialog({
   useLayoutEffect(() => {
     lifetimeRef.current = open ? Symbol('confirmation') : null
 
+  // Cancel the pending close timer on unmount. The timer below holds the
+  // "done" beat visible for 600ms, and an unmount inside that window used to
+  // leave it armed. It then called onClose on a tree that is gone, which
+  // reaches setState in the parent. Under vitest the environment can be torn
+  // down first, and React then reads `window` during the update and throws
+  // ReferenceError.
+  // The write below is a timer handle, and not a mirror of a reactive value.
+  // It happens on unmount only, and it clears the handle this component owns.
+  // An onConfirm that unmounts the caller (disband leaves the room) resolves
+  // after cleanup ran, so the timer must not be armed once unmounted.
+  // eslint-disable-next-line no-restricted-syntax
+  useEffect(() => {
+    unmountedRef.current = false
+
     return () => {
       lifetimeRef.current = null
+      unmountedRef.current = true
+
       if (closeTimerRef.current !== null) {
         window.clearTimeout(closeTimerRef.current)
         closeTimerRef.current = null
@@ -110,6 +127,11 @@ export function ConfirmDialog({
 
       if (dismissOnConfirm) {
         onClose()
+        return
+      }
+
+
+      if (unmountedRef.current) {
         return
       }
 

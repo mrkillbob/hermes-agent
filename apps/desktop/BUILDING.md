@@ -118,8 +118,8 @@ python scripts/bundles/desktop.py --tag=vX.Y.Z
 Replace `vX.Y.Z` with an actual immutable tag. Stable tags must match the
 version in `pyproject.toml`. Canary tags use the release script's tag grammar.
 Start with host Python 3.11+ and Git. Use `python3` if that is your host's command.
-Preparation asks PM for the pinned Python, Node, npm and private installer;
-preinstalling a separate Node/npm/uv toolchain is not required. Native dependency
+Preparation asks PM for the pinned Python, Node, pnpm and private installer;
+preinstalling a separate Node/pnpm/uv toolchain is not required. Native dependency
 builds still need the platform's compiler, SDK and libraries. Windows ARM64 uses
 the shared Visual Studio/Clang/Rust/static OpenSSL preparation provider, which
 can require Administrator permissions for missing system components. macOS
@@ -230,15 +230,6 @@ string values are defaults and whose `null` values are explicit clears. For exam
 are rejected. These settings are not applied to the build runner itself.
 Commit archive keys still use the SHA, so use a fresh commit for different
 defaults: an existing artifact is never overwritten with different bytes.
-
-The connector preference uses the active profile's `nous.preview_full_connectors`
-in `config.yaml`: `true` or `false` is sent only when creating its free-tier account;
-`null` or an unset key leaves the account service's default. It is a preference,
-not proof of entitlement. The former `HERMES_PREVIEW_FULL_CONNECTORS` runtime and
-bundle setting is retired. Its release-baked default is deliberately replaced by
-profile configuration or the server default; published channel metadata carrying
-that key remains readable and the retired key is discarded. Existing accounts
-and credentials are unchanged, and changing the preference does not re-mint them.
 
 The workflow must exist on the repository's default branch. Admission requires
 a default-branch `workflow_dispatch` and repository write, maintain, or admin
@@ -384,12 +375,11 @@ Prepare and activate the [PM developer environment](../../website/docs/reference
 first. Use Bash `source ./activate` or PowerShell `. .\activate.ps1`, and keep a
 separate development home. Activation supplies the toolchain, not `node_modules`.
 
-From the repository root, use the [canonical Desktop installer](README.md#development),
-which documents why bare npm installs do not preserve the compiler guarantee:
+From the repository root:
 
 ```sh
-npm run install:desktop
-npm run dev --workspace apps/desktop
+pnpm install --frozen-lockfile
+pnpm --dir apps/desktop run dev
 ```
 
 For an ordinary package of that desktop build, use the workspace's
