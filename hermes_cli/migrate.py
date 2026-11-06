@@ -12,6 +12,7 @@ from typing import Any
 
 from hermes_cli.colors import Colors, color
 from hermes_cli.config import load_config
+from hermes_cli.setup_agent_import import migrate_from_agents
 
 
 def cmd_migrate(args: Any) -> int:
@@ -20,7 +21,6 @@ def cmd_migrate(args: Any) -> int:
         return cmd_migrate_xai(args)
     if getattr(args, "migrate_type", None) is None:
         from hermes_cli.config import get_hermes_home
-        from hermes_cli.setup_agent_import import migrate_from_agents
         return migrate_from_agents(get_hermes_home())
 
     print("usage: hermes migrate [<agent> | xai [--apply] [--no-backup]]", file=sys.stderr)
@@ -36,7 +36,6 @@ def cmd_migrate_agent(args: Any) -> int:
     """``hermes migrate <agent>``: install the agent-importers plugin when missing, then run its
     import for that agent with the flags given here."""
     from hermes_cli.config import get_hermes_home
-    from hermes_cli.setup_agent_import import migrate_from_agents
     extra = [flag for dest, flag in _AGENT_IMPORT_FLAGS if getattr(args, dest, False)]
     if getattr(args, "source", None):
         extra += ["--source", str(Path(args.source).expanduser())]

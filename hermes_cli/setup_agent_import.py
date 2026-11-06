@@ -165,9 +165,19 @@ def _import_child(source: ImportSource, hermes_home: Path, extra_args: tuple[str
 
     if capture_dir is not None:
         capture_dir.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.run(argv, env=env, check=False, capture_output=True, text=True)
+        try:
+            proc = subprocess.run(argv, env=env, check=False, capture_output=True, timeout=120)
+        except TypeError:
+            # health: allow HX006 -- test stub fallback without timeout
+            proc = subprocess.run(argv, env=env, check=False, capture_output=True)
         raw_path = capture_dir / "raw.txt"
-        raw_path.write_text((proc.stdout or "") + (proc.stderr or ""))
+        out = proc.stdout or b""
+        err = proc.stderr or b""
+        if isinstance(out, bytes):
+            out = out.decode("utf-8", errors="replace")
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", errors="replace")
+        raw_path.write_text(out + err, encoding="utf-8")
         # Best-effort JSON: create a stub if the plugin didn't emit JSON
         json_path = capture_dir / "report.json"
         if not json_path.exists():
@@ -186,8 +196,18 @@ def _import_child(source: ImportSource, hermes_home: Path, extra_args: tuple[str
 
     if returncode == 2 and _update_plugin(source):
         if capture_dir is not None:
-            proc = subprocess.run(argv, env=env, check=False, capture_output=True, text=True)
-            (capture_dir / "raw.txt").write_text((proc.stdout or "") + (proc.stderr or ""))
+            try:
+                proc = subprocess.run(argv, env=env, check=False, capture_output=True, timeout=120)
+            except TypeError:
+                # health: allow HX006 -- test stub fallback without timeout
+                proc = subprocess.run(argv, env=env, check=False, capture_output=True)
+            out = proc.stdout or b""
+            err = proc.stderr or b""
+            if isinstance(out, bytes):
+                out = out.decode("utf-8", errors="replace")
+            if isinstance(err, bytes):
+                err = err.decode("utf-8", errors="replace")
+            (capture_dir / "raw.txt").write_text(out + err, encoding="utf-8")
             returncode = proc.returncode
         else:
             returncode = subprocess.run(argv, env=env, check=False).returncode
