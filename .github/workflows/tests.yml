@@ -211,7 +211,7 @@ jobs:
         # build the TUI before the suite starts.
         uses: ./.github/actions/retry
         with:
-          command: npm ci --workspace ui-tui --ignore-scripts --no-audit --no-fund && npm run build --workspace ui-tui
+          command: pnpm install --frozen-lockfile --filter ui-tui --ignore-scripts && pnpm --filter ui-tui run build
 
       - name: Install ripgrep (prebuilt binary)
         run: |
@@ -406,12 +406,13 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # 7.0.0
         with:
           node-version: 26
-          cache: npm
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Prepare shared Node dependencies for updater legs
         run: |
-          echo "HERMES_E2E_NODE_CACHE=$HOME/.npm" >> "$GITHUB_ENV"
-          npm ci --workspace ui-tui --workspace web --include-workspace-root --no-audit --no-fund
+          echo "HERMES_E2E_NODE_CACHE=$HOME/.local/share/pnpm/store" >> "$GITHUB_ENV"
+          pnpm install --frozen-lockfile
 
       - name: Install ripgrep (prebuilt binary)
         run: |
