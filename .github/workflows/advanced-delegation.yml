@@ -21,7 +21,7 @@ jobs:
         run: pytest -q tests/tools/test_delegation_advanced_routing.py tests/tools/test_delegate_summary_budget_cap_enforced_small.py
       - name: Run representative benchmark
         run: |
-          python evals/advanced_routing/bench.py
+          python -m evals.advanced_routing.bench
       - name: Verify grants mock (non-secret)
         run: |
           mkdir -p artifacts
