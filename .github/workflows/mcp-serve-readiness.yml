@@ -1,0 +1,95 @@
+name: mcp-serve-readiness
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'agent/transports/hermes_tools_mcp_server.py'
+      - 'plugin-catalog/mcp-serve.yaml'
+      - 'tests/**'
+      - '.github/workflows/mcp-serve-readiness.yml'
+
+jobs:
+  durability-and-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Hermes PM environment
+        uses: ./.github/actions/setup-pm
+
+      - name: Lint / health checks
+        run: |
+          python scripts/check
+
+      - name: Run A2A durability suite (subset)
+        env:
+          TZ: UTC
+          LANG: C.UTF-8
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          tests=(
+            tests/plugins/test_a2a_client_receipts.py
+            tests/plugins/test_a2a_event_limits.py
+            tests/plugins/test_a2a_event_stream.py
+            tests/plugins/test_a2a_forwarded_cancel_retry.py
+            tests/plugins/test_a2a_no_token_guards.py
+            tests/plugins/test_a2a_phase23.py
+            tests/plugins/test_a2a_plugin.py
+            tests/plugins/test_a2a_rejected_resend.py
+            tests/plugins/test_a2a_tools_gate.py
+            tests/gateway/test_session_a2a.py
+            tests/gateway/test_session_a2a_events.py
+            tests/hermes_state/test_a2a_event_tasks.py
+            tests/tools/test_a2a_reason_roundtrip.py
+          )
+          scripts/run_tests.sh "${tests[@]}" -q | tee artifacts/tests.log
+
+      - name: Dump hermes-identity handshake and qualification JSON
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          python3 - <<'PY'
+import json, os
+os.environ['HERMES_MCP_READONLY']='1'
+from agent.transports import hermes_tools_mcp_server as m
+# Build server and locate resources
+srv = m._build_server()
+resources = getattr(srv, '_resources', [])
+byname = {r.get('name'): r for r in resources if isinstance(r, dict)}
+# Identity payload
+identity = {}
+if 'hermes-identity' in byname:
+    try:
+        identity = byname['hermes-identity']['fn']() or {}
+    except Exception as e:
+        identity = {'error': str(e)}
+# Read-only tools list
+readonly_tools = list(sorted(set(m._profile_scoped_exposed_tools())))
+# Qualification summary
+qual = {
+    'schema': 'hermes.mcp.serve.qualify.v1',
+    'pin': '1.0.0',
+    'readonly_tools': readonly_tools,
+    'notes': [
+        'Approvals disabled; ESTOP preserved',
+        'Profile-scoped allowlist active when profile in {test, a2a-test} or HERMES_MCP_READONLY=1'
+    ],
+}
+open('artifacts/identity.json','w').write(json.dumps(identity, indent=2))
+open('artifacts/qualify.json','w').write(json.dumps(qual, indent=2))
+print('Wrote artifacts/identity.json and artifacts/qualify.json')
+PY
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-mcp-serve-readiness-${{ github.run_id }}
+          path: |
+            artifacts/tests.log
+            artifacts/identity.json
+            artifacts/qualify.json
+          if-no-files-found: error
