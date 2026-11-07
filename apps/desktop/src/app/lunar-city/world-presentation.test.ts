@@ -38,6 +38,19 @@ describe('display-only presentation animation tags', () => {
     expect(presentation.sceneTag).toBe('alert.unclassified')
   })
 
+  it('presents stale workers as a low-intensity missing-heartbeat discovery', () => {
+    const presentation = resolveWorldPresentation({ ...event, kind: 'worker.stale' }, [])
+
+    expect(presentation.animationTags).toEqual(['worker.stale', 'heartbeat.stalled', 'inspect', 'waiting'])
+    expect(presentation.sceneTag).toBe('crisis.worker.stale')
+    expect(presentation.cosmetic).toEqual({
+      cameraBeat: 'worker_discovery',
+      soundTag: 'alert.warning',
+      intensity: 1
+    })
+    expect(presentation.npcActivities[0].state).toBe('waiting')
+  })
+
   it('copies metadata so mutations cannot change future scene resolution', () => {
     const presentation = resolveWorldPresentation(event, [])
     presentation.animationTags.push('local-only')

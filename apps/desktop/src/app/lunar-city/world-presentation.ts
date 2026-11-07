@@ -99,6 +99,14 @@ const SCENES: Record<string, SceneSpec> = {
     sceneTag: 'crisis.transport.stalled',
     soundTag: 'alert.warning'
   },
+  'worker.stale': {
+    animationTags: ['worker.stale', 'heartbeat.stalled', 'inspect', 'waiting'],
+    cameraBeat: 'worker_discovery',
+    intensity: 1,
+    npcState: 'waiting',
+    sceneTag: 'crisis.worker.stale',
+    soundTag: 'alert.warning'
+  },
   'task.running': {
     animationTags: ['task.running', 'travel', 'task.work'],
     intensity: 0,
