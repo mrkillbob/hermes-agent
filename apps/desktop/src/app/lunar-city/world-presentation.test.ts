@@ -1,10 +1,32 @@
+import type { AgentNoticePayload } from '@/store/agent-notices'
+
+import type { CompletionEvent } from '../../plugins/kanban/completion-notify'
+import type { KanbanTask } from '../../plugins/kanban/types'
+
 import { describe, expect, it } from 'vitest'
 
 import { resolveWorldAnimation } from './world-animation'
 import type {
+  ApprovalWorldEventInput,
+  CreditWorldEventInput,
+  GatewayWorldEventInput,
+  ProfileLifecycleWorldEventInput,
+  PullRequestWorldEventInput,
+  ReleaseWorldEventInput,
   WorldCondition,
   WorldEvent,
   WorldSeverity
+} from './world-events'
+import {
+  classifyTaskCondition,
+  normalizeAgentNotice,
+  normalizeApprovalEvent,
+  normalizeCreditEvent,
+  normalizeGatewayEvent,
+  normalizeKanbanEvent,
+  normalizeProfileLifecycleEvent,
+  normalizePullRequestEvent,
+  normalizeReleaseEvent
 } from './world-events'
 import { FALLBACK_SCENE, resolveWorldPresentation } from './world-presentation'
 
@@ -65,84 +87,57 @@ describe('display-only presentation animation tags', () => {
 })
 
 describe('SCENES coverage for producer-side event kinds', () => {
-  // Producer-side event kinds from world-events.ts that should each have a dedicated SCENES entry
-  // This enumeration includes:
-  // - kanban spec worldKinds (task.blocked, task.block_loop, worker.crashed, worker.gave_up, worker.timed_out,
-  //   task.completed, task.recovered, task.removed, task.in_review, task.running, task.ready, task.waiting)
-  // - condition kinds (worker.stale from classifyTaskCondition)
-  // - agent notice kinds (agent.active, agent.idle, agent.warning, agent.error, agent.success, agent.info)
-  // - credits kinds (credits.depleted, credits.low, credits.reset)
-  const worldKinds = [
-    'task.blocked',
-    'task.block_loop',
-    'task.completed',
-    'task.recovered',
-    'task.removed',
-    'task.in_review',
-    'task.running',
-    'task.ready',
-    'task.waiting',
-    'worker.crashed',
-    'worker.gave_up',
-    'worker.timed_out',
-    'worker.stale',
-    'agent.active',
-    'agent.idle',
-    'agent.warning',
-    'agent.error',
-    'agent.success',
-    'agent.info',
-    'credits.depleted',
-    'credits.low',
-    'credits.reset'
+  // Producer-side enumeration derived by invoking each producer with every discriminant.
+  // Keep these fixtures aligned with the producer input unions in world-events.ts.
+  const kanbanKinds = [
+    'blocked', 'block_loop_detected', 'crashed', 'gave_up', 'timed_out', 'completed', 'done', 'unblocked',
+    'archived', 'deleted', 'review', 'running', 'ready', 'scheduled', 'todo', 'triage', 'future_kind'
+  ].map(kind => normalizeKanbanEvent('test', {
+    id: kind, kind, task_id: `task-${kind}`, payload: {}
+  } as CompletionEvent).kind)
+  const agentKinds = ['success', 'error', 'warn', 'info', ''].map(level => normalizeAgentNotice({
+    id: `notice-${level}`, level, text: 'notice'
+  } as AgentNoticePayload)?.kind).filter((kind): kind is string => Boolean(kind))
+  const prKinds = (['approved', 'checks_failed', 'closed', 'conflict', 'draft_merged', 'merged', 'review_findings', 'review_requested'] as PullRequestWorldEventInput['status'][])
+    .map(status => normalizePullRequestEvent({ id: status, number: 1, repository: 'test/repo', status, title: status }).kind)
+  const releaseKinds = (['failed', 'started', 'succeeded'] as ReleaseWorldEventInput['status'][])
+    .map(status => normalizeReleaseEvent({ id: status, name: status, status }).kind)
+  const gatewayKinds = (['auth_failed', 'connected', 'degraded', 'disconnected', 'failed'] as GatewayWorldEventInput['status'][])
+    .map(status => normalizeGatewayEvent({ id: status, profile: 'test', status }).kind)
+  const approvalKinds = (['granted', 'rejected', 'required'] as ApprovalWorldEventInput['status'][])
+    .map(status => normalizeApprovalEvent({ actionId: status, id: status, sessionId: 'test', status, title: status }).kind)
+  const creditKinds = (['depleted', 'low', 'reset'] as CreditWorldEventInput['status'][])
+    .map(status => normalizeCreditEvent({ id: status, remainingPercent: 10, status }).kind)
+  const profileKinds = (['active', 'blocked', 'crashed', 'idle', 'working'] as ProfileLifecycleWorldEventInput['status'][])
+    .map(status => normalizeProfileLifecycleEvent({ id: status, profile: status, role: 'worker', status }).kind)
+  const conditionKinds = (['stale', 'fresh'] as const)
+    .map((heartbeat, index) => classifyTaskCondition({
+      heartbeat_at: index === 0 ? 0 : Date.now(), id: `condition-${heartbeat}`, status: 'running', title: heartbeat
+    } as KanbanTask, Date.now() + 180_000)?.kind)
+    .filter((kind): kind is string => Boolean(kind))
+  const producerKinds = [
+    ...kanbanKinds, ...agentKinds, ...prKinds, ...releaseKinds, ...gatewayKinds,
+    ...approvalKinds, ...creditKinds, ...profileKinds, ...conditionKinds
   ]
 
-  // PR/release/gateway/approval kinds from normalizePullRequestEvent, normalizeReleaseEvent, etc.
-  const prReleaseKinds = [
-    'pr.approved',
-    'pr.review_findings',
-    'pr.merge_conflict',
-    'pr.merged_draft',
-    'pr.merged_stable',
-    'pr.closed',
-    'pr.review_requested',
-    'release.succeeded',
-    'release.started',
-    'release.failed',
-    'gateway.disconnected',
-    'gateway.connected',
-    'gateway.degraded',
-    'auth.failed',
-    'approval.required',
-    'approval.granted',
-    'approval.rejected'
-  ]
-
-  // FALLBACK_SCENE kinds by design (unclassified_alert and dynamic system.*)
-  const fallbackKinds = [
-    'system.unclassified_alert'
-  ]
+  // FALLBACK_SCENE is intentional for unclassified system alerts and dynamic system.* kinds.
+  const fallbackKinds = ['system.unclassified_alert', 'system.future_alert']
 
   it('resolves every producer-side kind to a dedicated SCENES entry (not FALLBACK_SCENE)', () => {
-    const allKinds = [...worldKinds, ...prReleaseKinds]
-
-    for (const kind of allKinds) {
+    for (const kind of producerKinds) {
       const presentation = resolveWorldPresentation({ ...event, kind } as WorldEvent, [])
-      expect(presentation.sceneTag).not.toBe(FALLBACK_SCENE.sceneTag)
+      expect(presentation.sceneTag, `producer kind ${kind}`).not.toBe(FALLBACK_SCENE.sceneTag)
     }
   })
 
   it('explicitly allows FALLBACK_SCENE for unclassified system alerts', () => {
-    // These are by design - future kinds that use system.* namespace resolve to FALLBACK_SCENE
-    const presentation = resolveWorldPresentation({
-      ...event,
-      kind: 'system.unclassified_alert',
-      scope: 'city',
-      severity: 'warning' as WorldSeverity
-    }, [])
-
-    expect(presentation.sceneTag).toBe('alert.unclassified')
-    expect(presentation.cosmetic.intensity).toBe(1)
+    for (const kind of fallbackKinds) {
+      const presentation = resolveWorldPresentation({
+        ...event, kind, scope: 'city', severity: 'warning' as WorldSeverity
+      }, [])
+      expect(presentation.sceneTag).toBe('alert.unclassified')
+      expect(presentation.cosmetic.intensity).toBe(1)
+    }
   })
 })
 

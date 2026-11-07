@@ -252,6 +252,15 @@ export const LUNAR_CITY_ASSET_MANIFEST: WorldAssetManifest = {
       visualTags: ['dispatcher', 'companion', 'new-task']
     },
     {
+      bindings: [{ objectNames: ['task-lantern-stalled'], role: 'task-status' }],
+      collection: 'Props',
+      id: 'task-lantern-stalled',
+      kind: 'prop',
+      lod: ['high', 'medium', 'low'],
+      textureSet: 'garden-biome',
+      visualTags: ['stale', 'heartbeat-stalled', 'task-status', 'dimmed']
+    },
+    {
       collection: 'Props',
       id: 'break-garden',
       instanced: true,

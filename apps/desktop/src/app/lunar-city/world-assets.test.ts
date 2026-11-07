@@ -45,6 +45,16 @@ describe('Lunar City asset manifest', () => {
     expect(LUNAR_CITY_ASSET_MANIFEST.assets.some(asset => asset.id === 'terrain-colony-basin')).toBe(true)
     expect(LUNAR_CITY_ASSET_MANIFEST.assets.some(asset => asset.id === 'road-network-primary')).toBe(true)
     expect(LUNAR_CITY_ASSET_MANIFEST.assets.some(asset => asset.id === 'dispatcher-cube')).toBe(true)
+    const stalledLantern = LUNAR_CITY_ASSET_MANIFEST.assets.find(asset => asset.id === 'task-lantern-stalled')
+    expect(stalledLantern).toMatchObject({
+      kind: 'prop',
+      visualTags: expect.arrayContaining(['stale', 'heartbeat-stalled', 'dimmed'])
+    })
+    expect(LUNAR_CITY_ASSET_MANIFEST.animationClips.find(clip => clip.clip === 'wait')?.tags).toContain('waiting')
+    expect(LUNAR_CITY_ASSET_MANIFEST.assets.filter(asset => asset.kind === 'character' && asset.role !== 'child'))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ visualTags: expect.arrayContaining(['stale', 'heartbeat-stalled']) })
+      ]))
     expect(LUNAR_CITY_ASSET_MANIFEST.animationClips.map(clip => clip.clip)).toEqual([
       'idle',
       'walk',
