@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -87,6 +88,112 @@ function removeInstalledTrees(source, projects) {
   }
 }
 
+// An interrupted Windows update can leave a nested .bin that cleanup cannot clear
+// (ENOTEMPTY, #75584); only deleting the trees recovers it, and the code surfaces in
+// pnpm's logs. npm spoke of this failure as the HERMES_NPM_FAILURE_V1 frame the update
+// seed validates (apps/desktop/e2e/update/seed.py); the wire name stays across the
+// pnpm migration so the seed consumer, its tests and shipped updaters keep working.
+// stdio stays on the terminal: the installer reads npm_config_logs_dir (a setting it
+// ignores if unknown) and we diff our own logs dir for the codes.
+const NPM_FAILURE_TOKENS = {
+  codes: ['ENOTEMPTY', 'ENOENT', 'EACCES', 'EPERM', 'ENOSPC', 'EBUSY', 'ECONNRESET', 'ECONNREFUSED',
+    'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EINTEGRITY', 'EBADENGINE', 'ERESOLVE', 'ELIFECYCLE', 'E401', 'E403', 'E404', 'E429'],
+  syscalls: ['rmdir', 'unlink', 'rename', 'open', 'mkdir', 'scandir', 'read', 'write', 'connect', 'spawn'],
+  errnos: ['-1', '-2', '-13', '-17', '-28', '-39', '-4048', '-4058', '-4082'],
+}
+const NPM_FAILURE_SIGNALS = ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGSEGV', 'SIGBUS', 'SIGXCPU', 'SIGXFSZ', 'SIGHUP']
+
+function pnpmLogSnapshot(dir) {
+  try {
+    return new Map(readdirSync(dir).map(name => {
+      const stat = lstatSync(join(dir, name))
+      return [name, `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`]
+    }))
+  } catch {
+    return new Map()
+  }
+}
+
+// Installer logs may contain registry credentials, lifecycle output and arbitrary
+// paths. Copy no text: accept only complete, known tokens from numbered npm records
+// (the debug-log shape pnpm keeps compatible).
+function pnpmFailureLog(dir, before) {
+  const after = pnpmLogSnapshot(dir)
+  const names = [...after.keys()].filter(name => after.get(name) !== before.get(name)).sort()
+  const found = Object.fromEntries(Object.keys(NPM_FAILURE_TOKENS).map(key => [key, new Set()]))
+  let readable = names.length > 0
+  let truncated = names.length > 16
+  for (const name of names.slice(0, 16)) {
+    let fd
+    try {
+      const path = join(dir, name)
+      const stat = lstatSync(path)
+      if (!stat.isFile()) throw new Error('not a regular installer log')
+      fd = openSync(path, 'r')
+      const opened = fstatSync(fd)
+      if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error('changed installer log')
+      const offset = Math.max(0, opened.size - 65536)
+      const bytes = Buffer.alloc(Math.min(opened.size, 65536))
+      const count = readSync(fd, bytes, 0, bytes.length, offset)
+      truncated ||= offset > 0
+      for (const line of bytes.subarray(0, count).toString('utf8').split(/\r?\n/)) {
+        const match = /^\d+ (?:error|verbose) (code|syscall|errno) (.+)$/.exec(line)
+        if (!match) continue
+        const key = { code: 'codes', syscall: 'syscalls', errno: 'errnos' }[match[1]]
+        found[key].add(NPM_FAILURE_TOKENS[key].includes(match[2]) ? match[2] : 'unknown')
+      }
+    } catch {
+      readable = false
+    } finally {
+      if (fd !== undefined) closeSync(fd)
+    }
+  }
+  return { log_present: names.length > 0, log_readable: readable, log_truncated: truncated,
+    ...Object.fromEntries(Object.entries(found).map(([key, values]) => [key, values.size ? [...values].sort() : ['unknown']])) }
+}
+
+function runPnpmInstall(pnpm, args, { source, env, pnpmVersion: version, projects }) {
+  const logsDir = mkdtempSync(join(tmpdir(), 'hermes-pnpm-logs-'))
+  // The receipt hash already covered the user's npm_config_* settings; this scratch
+  // location must not change the identity of the install, so it joins only the child env.
+  const runEnv = { ...env, npm_config_logs_dir: logsDir }
+  let attempt = 0
+  const run = () => {
+    attempt += 1
+    const before = pnpmLogSnapshot(logsDir)
+    const started = performance.now()
+    try {
+      execFileSync(pnpm, args, { cwd: source, env: runEnv, stdio: 'inherit' })
+    } catch (error) {
+      const safe = value => typeof value === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(value) ? value : 'unknown'
+      // npm_version is the seed schema's field name for the package-manager version.
+      console.error('HERMES_NPM_FAILURE_V1 ' + JSON.stringify({ schema: 1, phase: 'npm_ci', attempt,
+        status: Number.isInteger(error.status) && error.status >= 0 && error.status <= 2147483647 ? error.status : null,
+        signal: error.signal == null ? null : NPM_FAILURE_SIGNALS.includes(error.signal) ? error.signal : 'unknown',
+        node_version: safe(process.versions.node), npm_version: safe(version),
+        elapsed_ms: Math.max(0, Math.round(performance.now() - started)), ...pnpmFailureLog(logsDir, before) }))
+      throw error
+    }
+  }
+  try {
+    run()
+  } catch (error) {
+    const logged = readdirSync(logsDir).some(name => {
+      try {
+        return readFileSync(join(logsDir, name), 'utf8').includes('ENOTEMPTY')
+      } catch {
+        return false
+      }
+    })
+    if (!logged) throw error
+    console.log('node-deps: pnpm install hit ENOTEMPTY; removing node_modules and retrying once...')
+    removeInstalledTrees(source, projects)
+    run()
+  } finally {
+    rmSync(logsDir, { recursive: true, force: true })
+  }
+}
+
 /** Install the full requested workspace union in one strict, locked operation.
  *  ``electron: false`` leaves Desktop's Electron binary unprepared, for builds that never run it. */
 export function prepareNodeDependencies({ source, workspaces, env = process.env, reuse = false, install = true, nativeToolchain, electron = true }) {
@@ -151,7 +258,7 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env,
   rmSync(nativeReceipt, { force: true })
   removeInstalledTrees(source, projects)
   console.log(`node-deps: installing workspace dependencies with pnpm (${selected.join(', ')})...`)
-  execFileSync(pnpm, args, { cwd: source, env, stdio: 'inherit' })
+  runPnpmInstall(pnpm, args, { source, env, pnpmVersion: version, projects })
   if (prepareElectron) prepareElectronRuntime({ source, install, env })
   if (reuse) {
     const completed = `${key}\n${createHash('sha256').update(readFileSync(installedLock)).digest('hex')}\n`
