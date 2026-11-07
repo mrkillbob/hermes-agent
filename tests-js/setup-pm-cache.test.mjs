@@ -91,7 +91,7 @@ const payloadEvents = {
 
 it('finds a release and a commit leg for every native target, and the payload producer', () => {
   const legs = desktopLegs.map(([, job]) => `${targetOf(job)}:${job['cache-mode']}`).sort()
-  const targets = ['darwin-arm64', 'win32-arm64', 'win32-x64']
+  const targets = ['darwin-arm64', 'darwin-x64', 'win32-arm64', 'win32-x64']
   expect(legs).toEqual(targets.flatMap(target => [`${target}:read`, `${target}:write`]).sort())
   expect(cacheUsers(payload)).toHaveLength(1)
 })
@@ -168,7 +168,7 @@ it.each([
 it('each selection gate joins exactly one target\'s two trust branches after admission', () => {
   const legs = Object.fromEntries(desktopLegs.map(([id, job]) => [id, job]))
   const gates = Object.values(desktop.jobs).filter(job => job.env?.SELECTED_BUILD_SUCCEEDED)
-  expect(gates).toHaveLength(3)  // darwin-arm64, win32-arm64, win32-x64
+  expect(gates).toHaveLength(4)
   for (const gate of gates) {
     const [admission, ...branches] = gate.needs
     expect(admission).toBe('validate')
@@ -200,7 +200,7 @@ it.each(['ARM64', 'X64'])('native %s setup inherits event-aware restore, save an
     // Resolve the caller's real overrides over the composite's real defaults.
     const inputs = Object.fromEntries(Object.entries(setup.inputs).map(([key, definition]) =>
       [key, inputValue(nativeSetup.with?.[key] ?? definition.default ?? '', context)]))
-    expect(inputs.packages).toBe('git,ripgrep')
+    expect(inputs.packages).toBe('git,ripgrep,pnpm')
     expect(inputs['test-environment']).toBe('true')
     for (const [saving, restoring] of [['tools-cache', 'tools-cache-restore'], ['python-cache', 'python-cache-restore']]) {
       expect(evaluate(step(saving).if, { ...context, inputs }), `${arch} ${event_name} ${saving}`).toBe(saves)
