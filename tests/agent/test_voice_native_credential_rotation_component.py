@@ -47,7 +47,7 @@ def native_component(real_components, monkeypatch):
         'credentials': 'agent.anthropic_credentials',
         'rotation': 'agent.auxiliary_key_rotation', 'aux': 'agent.auxiliary_task_config',
         'providers': 'hermes_cli.providers', 'chat': 'agent.chat_completion_helpers',
-        'compression': 'agent.conversation_compression',
+        'compression': 'agent.conversation_compression_feasibility',
     }
     modules = {name: importlib.import_module(path) for name, path in names.items()}
     helpers = sys.modules['agent.agent_runtime_helpers']

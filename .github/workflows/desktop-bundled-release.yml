@@ -685,7 +685,7 @@ jobs:
         if: inputs.skip-tests != true
         shell: bash
         working-directory: apps/desktop
-        run: node ../../node_modules/vitest/vitest.mjs run --project electron scripts/payload-sign-cache.test.mjs scripts/batch-sign-binaries.test.mjs
+        run: node node_modules/vitest/vitest.mjs run --project electron scripts/payload-sign-cache.test.mjs scripts/batch-sign-binaries.test.mjs
 
       # Commit jobs share these steps but have read-only cache tokens.
       - name: Save verified payload signatures
@@ -1495,7 +1495,7 @@ jobs:
         uses: ./.github/actions/retry
         with:
           # No Electron/native postinstalls: only the builder's SDK downloader.
-          command: npm ci --workspace apps/desktop --include-workspace-root --include=dev --ignore-scripts --no-audit --no-fund
+          command: pnpm install --frozen-lockfile --filter "{./apps/desktop}..." --ignore-scripts
 
       - name: Retrieve Windows packages from R2
         shell: bash

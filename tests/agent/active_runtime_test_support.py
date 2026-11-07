@@ -36,7 +36,7 @@ def active_component(real_components, monkeypatch):
         key: importlib.import_module(name) for key, name in {
             'voice': 'agent.voice_turn_route', 'binding': 'agent.route_binding',
             'mutation': 'agent.runtime_mutation', 'aux': 'agent.auxiliary_task_config',
-            'compression': 'agent.conversation_compression',
+            'compression': 'agent.conversation_compression_feasibility',
             'providers': 'hermes_cli.providers', 'config': 'hermes_cli.config',
             'chat': 'agent.chat_completion_helpers',
         }.items()

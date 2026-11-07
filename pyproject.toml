@@ -138,7 +138,6 @@ dependencies = [
   # wrapper over it). Pure Python, and its pins match Pillow/websockets above,
   # so it rides in the main venv and every install, Desktop bundle included,
   # ships it without a separate tool environment.
-  # Reviewed Pillow 13 compatibility correction; retain upstream history.
   "browser-harness @ git+https://github.com/mrkillbob/browser-harness.git@07378b2e6518f5b3cfdf20991cf8d7a50217400b ; python_version >= '3.14'",
   # .gitignore-aware file matching for desktop build stamp.
   "pathspec==1.1.1; python_version >= '3.14'",
@@ -276,7 +275,7 @@ messaging = [
   "slack-bolt==1.30.0",
   "slack-sdk==3.45.0",
   "qrcode==7.4.2",
-] # aiohttp 3.14.5: prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7/GHSA-2g87-pp6c-29x5/GHSA-494j-54xm-rwp3/GHSA-5wr8-gcqf-gqf3
+] # aiohttp 3.14.5: prior CVEs + GHSA-9xw5-w5jj-pvcg/GHSA-2g87-pp6c-29x5/GHSA-5wr8-gcqf-gqf3 family
 cron = [] # croniter is now a core dependency; this extra kept for back-compat
 slack = ["slack-bolt==1.30.0", "slack-sdk==3.45.0", "aiohttp==3.14.5"]
 # Matrix gateway deps. `mautrix[encryption]` pulls `python-olm`, whose
@@ -292,7 +291,7 @@ matrix = [
   "asyncpg==0.32.0; sys_platform == 'linux'",
   "aiohttp-socks==0.12.0; sys_platform == 'linux'",
   "aiohttp==3.14.5; sys_platform == 'linux'",
-] # aiohttp 3.14.5: prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7/GHSA-2g87-pp6c-29x5/GHSA-494j-54xm-rwp3/GHSA-5wr8-gcqf-gqf3 (mautrix/aiohttp-socks only cap aiohttp<4 / >=3.10, so pin the patched floor directly)
+] # aiohttp 3.14.5: prior CVEs + GHSA-9xw5-w5jj-pvcg/GHSA-2g87-pp6c-29x5/GHSA-5wr8-gcqf-gqf3 family (mautrix/aiohttp-socks only cap aiohttp<4 / >=3.10, so pin the patched floor directly)
 
 # WeCom callback-mode adapter — parses untrusted XML POST bodies from
 # WeCom-controlled callback endpoints, so we use defusedxml (drop-in
@@ -383,7 +382,7 @@ documents = [
   "openpyxl==3.1.5",
   "python-pptx==1.0.2",
   "reportlab==5.1.0",
-  "pypdf==6.21.2",
+  "pypdf==6.21.4",
 ]
 # PDF text extraction and rasterization for skills/productivity/pdf. Only in
 # the skills' side environment (`hermes pm environment documents --extra
@@ -433,7 +432,7 @@ sms = ["aiohttp==3.14.5"]
 teams = [
   "microsoft-teams-apps==2.1.1",
   "aiohttp==3.14.5",
-] # aiohttp 3.14.5: prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7/GHSA-2g87-pp6c-29x5/GHSA-494j-54xm-rwp3/GHSA-5wr8-gcqf-gqf3
+] # aiohttp 3.14.5: prior CVEs + GHSA-9xw5-w5jj-pvcg/GHSA-2g87-pp6c-29x5/GHSA-5wr8-gcqf-gqf3 family
 # Computer use talks to PM's pinned cua-driver over MCP stdio. This extra
 # provides the MCP client, independently of the native driver package.
 computer-use = [
@@ -504,9 +503,9 @@ google = [
   # The Google SDKs permit older vulnerable transitives, so unlocked installs
   # must carry the same fixed floors as uv.lock and the runtime installers:
   # httplib2 0.32.0 (GHSA-j5g9-f88f-gfj3 decompression bomb DoS),
-  # pyasn1 0.6.4, google-auth 2.55.1.
+  # pyasn1 0.6.5, google-auth 2.55.1.
   "httplib2==0.32.0",
-  "pyasn1==0.6.4",
+  "pyasn1==0.6.5",
 ]
 youtube = [
   # Required by skills/media/youtube-content and
@@ -572,7 +571,7 @@ dev = [
   "ty==0.0.89",
   "ruff==0.15.22",
   "setuptools==84.1.0",
-] # starlette: CVE-2026-48710; setuptools: >=84.1.0 fixes GHSA-xmj3-9gf7-h52w
+] # starlette: CVE-2026-48710; setuptools: 84.1.0 (GHSA-xmj3-9gf7-h52w; torch >=2.13 requires setuptools 83+)
 # Native launcher and provider-catalog E2E dependencies belong in the test
 # environment, not the core runtime. Keep the Anthropic SDK at the same
 # reviewed version as the optional runtime extra above.

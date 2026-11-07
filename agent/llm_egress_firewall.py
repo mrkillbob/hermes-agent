@@ -25,7 +25,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from agent.llm_egress_receipt_metadata import receipt_envelope
-from agent.llm_egress_context_atoms import PUBLIC_CONTEXT_ATOMS, canonical_chunked_context_atom
+from agent.llm_egress_context_atoms import SAFE_CONTEXT_WORDS, canonical_chunked_context_atom
 from agent.file_safety import get_read_block_error
 from agent.egress_source_annotations import mask_builtin_annotations
 from agent.cross_process_file_lock import (
@@ -266,28 +266,6 @@ _CODEX_ENCRYPTED_REASONING_REPLAY = re.compile(r"^gAAAA[A-Za-z0-9_=-]{20,}$")
 _ANTHROPIC_THINKING_SIGNATURE_REPLAY = re.compile(r"^[A-Za-z0-9+/]{20,8192}={0,2}$")
 _BOUNDED_DURATION = re.compile(r"^(?:0|[1-9][0-9]{0,6})(?:ms|s|m|h)$")
 _BOUNDED_CLI_WORD = re.compile(r"^--[a-z]+(?:-[a-z]+)*$")
-_SAFE_CONTEXT_WORDS = frozenset({
-    "PASS",
-    "WARN",
-    "SUMMARY",
-    "REQUIREMENTS",
-    "AVAILABILITY",
-    "HANDLING",
-    "VERIFICATION",
-    "ADVISORY",
-    "FAIL",
-    "SHA1",
-    "CRITICAL",
-    # Fixed command-syntax metavariables in the built-in Kanban guidance.
-    # They are not payloads even though their short all-caps forms can decode
-    # as canonical Base64 by coincidence.
-    "APPROVE",
-    "TEXT",
-    # Fixed ordinary labels and prose atoms. Only these exact spellings are
-    # exempt; arbitrary uppercase words and hyphenated blobs remain scanned.
-    "TOOL", "WINS", "IDLE",
-    "Cross-department",  # Ordinary Kanban prose, not arbitrary hyphenated blobs.
-}) | PUBLIC_CONTEXT_ATOMS
 _LINTER_DIAGNOSTIC_CODE = re.compile(r"^[A-Z][0-9]{3,4}$")
 _PYTHON_DUNDER_IDENTIFIER = re.compile(r"^__[a-z][a-z0-9_]{0,62}__$")
 _PYTHON_PRIVATE_IDENTIFIER = re.compile(r"^_[A-Za-z][A-Za-z0-9_]{1,63}$")
@@ -823,7 +801,7 @@ def _canonical_base64_candidate(candidate: str) -> bool:
         return False
     if candidate in _PROTOCOL_GRAMMAR_ATOMS:
         return False
-    if candidate in _SAFE_CONTEXT_WORDS:
+    if candidate in SAFE_CONTEXT_WORDS:
         # Exact context words are not an encoding channel; treating them as
         # Base64 strands workers while replaying ordinary CLI output.
         return False

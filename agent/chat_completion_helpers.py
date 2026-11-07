@@ -2103,7 +2103,7 @@ def _update_fallback_context_compressor(agent) -> None:
         api_key=getattr(agent, "api_key", ""), provider=agent.provider, api_mode=agent.api_mode,
     )
     if feasibility_was_checked:
-        from agent.conversation_compression import revalidate_compression_feasibility
+        from agent.conversation_compression_feasibility import revalidate_compression_feasibility
         revalidate_compression_feasibility(agent)
 
 

@@ -193,6 +193,12 @@ export interface ClientSessionState {
   heartbeatSettledAt?: null | number
   /** `turn_id` of the newest message.start; a re-sent start is not a new turn. */
   streamTurnId?: null | string
+  /** The owner admission the live turn executes, from its frames' execution stamp (`admission_id`). The in-flight
+   *  journal stores it so a reopen can ask the owner whether that exact execution is still pending. */
+  turnAdmissionId?: null | string
+  /** Newest row on screen when that message.start arrived: rows above it are
+   *  earlier turns, even when an interim seal left them marked `interim`. */
+  turnAnchorId?: null | string
   /** A blocking clarify prompt is waiting on the user for this session. Drives
    *  the sidebar "needs input" indicator; cleared when the turn resumes/ends. */
   needsInput: boolean

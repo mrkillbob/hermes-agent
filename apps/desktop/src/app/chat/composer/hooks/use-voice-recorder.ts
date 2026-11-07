@@ -82,6 +82,7 @@ export function useVoiceRecorder({
       if (dictation) {
         dictation.cancelLive()
         void syncSttLease(VOICE_INPUT_LEASE, false, dictation.owner)
+        void dictation.live?.().then(session => session?.cancel())
       }
     },
     []
@@ -179,6 +180,10 @@ export function useVoiceRecorder({
       return
     }
 
+    if (dictationRef.current) {
+      return
+    }
+
     const owner = resolveOwnerNow(ownerRef.current)
     let dictation: Dictation
     const stream = liveStream(owner, text => {
@@ -189,6 +194,7 @@ export function useVoiceRecorder({
     dictation = { cancelLive: stream.cancel, live: stream.session, owner, warmup: Promise.resolve() }
     // Publish before mic startup: unmount must retire pending stream opens too.
     dictationRef.current = dictation
+
     try {
       await handle.start({
         onError: error => {
@@ -203,6 +209,11 @@ export function useVoiceRecorder({
         handle.cancel()
         return
       }
+
+      if (dictationRef.current !== dictation) {
+        return
+      }
+
       // The mic is open, so a transcript is coming: warm the backend's STT
       // engine now so a cold local model loads while the user is still
       // speaking instead of inside the transcription timeout (#105955).
@@ -224,6 +235,13 @@ export function useVoiceRecorder({
         setVoiceStatus('idle')
         notifyError(error, voiceCopy.recordingFailed)
       }
+      if (dictationRef.current !== dictation) {
+        return
+      }
+
+      finish(dictation)
+      setVoiceStatus('idle')
+      notifyError(error, voiceCopy.recordingFailed)
     }
   }
 

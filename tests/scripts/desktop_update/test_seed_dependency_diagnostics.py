@@ -1,6 +1,8 @@
-"""Offline npm child/seed boundaries retain safe failure evidence before clipping.
+"""Offline installer-child/seed boundaries retain safe failure evidence before clipping.
 
-No installer, registry, compiler, or Desktop process runs in these fixtures.
+No installer, registry, compiler, or Desktop process runs in these fixtures. The
+failure frame keeps its npm-era wire name (HERMES_NPM_FAILURE_V1, phase npm_ci)
+because the update seed validates that schema.
 """
 from __future__ import annotations
 
@@ -26,40 +28,38 @@ def load_seed():
     return seed
 
 
-def synthetic_npm(tmp_path, logs):
+def synthetic_pnpm(tmp_path, logs):
     source = tmp_path / "source"
     (source / "web").mkdir(parents=True)
     (source / "node_modules").mkdir()
     (source / "node_modules/preserved-before-ci").write_text("existing tree")
-    (source / "package.json").write_text('{"private":true,"workspaces":["web"]}')
+    (source / "package.json").write_text('{"private":true}')
+    (source / "pnpm-workspace.yaml").write_text('packages:\n  - web\n')
     (source / "web/package.json").write_text('{"name":"fixture-web"}')
-    (source / "package-lock.json").write_text(json.dumps({"packages": {
-        "": {}, "web": {"name": "fixture-web"},
-        "node_modules/fixture-web": {"link": True, "resolved": "web"},
-    }}))
-    npm = tmp_path / "npm"
-    (npm / "bin").mkdir(parents=True)
-    (npm / "node_modules/semver").mkdir(parents=True)
-    (npm / "package.json").write_text('{"version":"12.0.2","type":"module"}')
-    (npm / "node_modules/semver/index.js").write_text(
-        'exports.satisfies = () => { throw Error("unexpected engine probe") }')
-    cli = npm / "bin/npm-cli.js"
-    # A real Node child is the only substitute: deterministic npm outputs, no network.
-    cli.write_text("""import {writeFileSync,readFileSync,existsSync} from 'node:fs';
+    # The importers map node-deps reads, in the shape pnpm writes it.
+    (source / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  web: {}\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    cli = bin_dir / "pnpm"
+    # A real Node child is the only substitute: deterministic pnpm outputs, no network.
+    cli.write_text("""#!/usr/bin/env node
+import {writeFileSync,readFileSync,existsSync} from 'node:fs';
+if (process.argv[2] === '--version') { process.stdout.write('12.15.0\\n'); process.exit(0); }
 const plan = JSON.parse(process.env.FIXTURE_PLAN);
 const calls = process.env.FIXTURE_CALLS;
 const count = existsSync(calls) ? Number(readFileSync(calls,'utf8')) : 0;
 writeFileSync(calls,String(count+1));
-const dir = process.argv.find(arg=>arg.startsWith('--logs-dir=')).slice(11);
-writeFileSync(process.env.FIXTURE_LOGDIR,dir);
+const dir = process.env.npm_config_logs_dir;
 const step = plan[count];
 if (step.log !== null) writeFileSync(dir+'/attempt-'+count+'.log',step.log);
 process.exitCode = step.status;
 """)
+    cli.chmod(0o755)
     env = {key: value for key, value in os.environ.items()
-           if not key.lower().startswith("npm_config_") and key not in {"NODE_OPTIONS", "npm_execpath"}}
-    env.update(npm_execpath=str(cli), FIXTURE_PLAN=json.dumps(logs),
-               FIXTURE_CALLS=str(tmp_path / "calls"), FIXTURE_LOGDIR=str(tmp_path / "logdir"))
+           if not key.lower().startswith(("npm_config_", "pnpm_config_"))
+           and key not in {"NODE_OPTIONS", "npm_execpath"}}
+    env.update(PATH=os.pathsep.join([str(bin_dir), env.get("PATH", "")]),
+               FIXTURE_PLAN=json.dumps(logs), FIXTURE_CALLS=str(tmp_path / "calls"))
     return source, env
 
 
@@ -76,7 +76,7 @@ process.exitCode = step.status;
       {"status": 0, "log": None}], 0),
 ])
 def test_source_builder_transports_failure_frames_to_seed_without_clipping(tmp_path, steps, expected_frames):
-    source, env = synthetic_npm(tmp_path, steps)
+    source, env = synthetic_pnpm(tmp_path, steps)
     env["HERMES_VERBOSE"] = "0"
     command = [sys.executable, "-c", """
 import os,sys,subprocess
@@ -84,7 +84,7 @@ from pathlib import Path
 from hermes_cli.source_build import run_source_script
 try:
     run_source_script(Path(sys.argv[1]),'scripts/build/node-deps.mjs',
-                      '--source',sys.argv[2],'--workspace','web',env=dict(os.environ),label='Synthetic npm')
+                      '--source',sys.argv[2],'--workspace','web',env=dict(os.environ),label='Synthetic pnpm')
 except subprocess.CalledProcessError as error:
     sys.exit(error.returncode)
 """, str(ROOT), str(source)]

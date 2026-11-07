@@ -29,7 +29,8 @@ GITHUB_TAP_PROVIDERS = {
     "openai/skills": "OpenAI", "anthropics/skills": "Anthropic", "huggingface/skills": "HuggingFace",
     "nvidia/skills": "NVIDIA", "voltagent/awesome-agent-skills": "VoltAgent", "garrytan/gstack": "gstack",
     "minimax-ai/cli": "MiniMax", "wandb/skills": "Weights & Biases", "qdrant/skills": "Qdrant",
-    "pinecone-io/skills": "Pinecone",
+    "pinecone-io/skills": "Pinecone", "makenotion/skills": "Notion", "airtable/skills": "Airtable",
+    "shopify/shopify-ai-toolkit": "Shopify",
 }
 
 # Accepted ``--source`` provider filters (lowercased). Not real source ids —
@@ -217,9 +218,14 @@ class GitHubSource(SkillSource):
         {"repo": "NVIDIA/skills", "path": "skills/"},
         # Vendor-maintained sources remain community-rated until separately reviewed;
         # browsing them does not relax the skill scanner or installation policy.
+        # Vendor-maintained skills for their own products; they replaced our copied
+        # weights-and-biases / qdrant / pinecone / notion / airtable / shopify optional skills.
         {"repo": "wandb/skills", "path": "skills/"},
         {"repo": "qdrant/skills", "path": "skills/"},
         {"repo": "pinecone-io/skills", "path": "skills/"},
+        {"repo": "makenotion/skills", "path": "skills/"},
+        {"repo": "Airtable/skills", "path": "plugins/airtable/skills/"},
+        {"repo": "Shopify/Shopify-AI-Toolkit", "path": "skills/"},
         {"repo": "garrytan/gstack", "path": ""},
         # --- Science bucket ---
         # Two scientific-skill repos share one hub category via the tap-level "bucket" key so

@@ -200,7 +200,7 @@ it.each(['ARM64', 'X64'])('native %s setup inherits event-aware restore, save an
     // Resolve the caller's real overrides over the composite's real defaults.
     const inputs = Object.fromEntries(Object.entries(setup.inputs).map(([key, definition]) =>
       [key, inputValue(nativeSetup.with?.[key] ?? definition.default ?? '', context)]))
-    expect(inputs.packages).toBe('git,ripgrep')
+    expect(inputs.packages).toBe('git,ripgrep,pnpm')
     expect(inputs['test-environment']).toBe('true')
     for (const [saving, restoring] of [['tools-cache', 'tools-cache-restore'], ['python-cache', 'python-cache-restore']]) {
       expect(evaluate(step(saving).if, { ...context, inputs }), `${arch} ${event_name} ${saving}`).toBe(saves)

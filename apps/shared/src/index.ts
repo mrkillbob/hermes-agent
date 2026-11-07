@@ -71,6 +71,7 @@ export {
   type ModelOptionsResult
 } from './gateway-contract.generated'
 export * from './gateway-events'
+export { HERMES_CLOUD_MANAGED, isHermesCloudUrl } from './hermes-cloud'
 export {
   applyDocumentLocale,
   type EndonymLocale,

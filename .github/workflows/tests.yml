@@ -107,6 +107,9 @@ jobs:
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
+          # Tests that drive the real scripts/build/node-deps.mjs need pnpm (and
+          # with it PM's Node) on PATH.
+          packages: pnpm
           extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
           test-environment: 'true'
           prune-python-cache: true
@@ -211,7 +214,7 @@ jobs:
         # build the TUI before the suite starts.
         uses: ./.github/actions/retry
         with:
-          command: npm ci --workspace ui-tui --ignore-scripts --no-audit --no-fund && npm run build --workspace ui-tui
+          command: pnpm install --frozen-lockfile --filter "{./ui-tui}..." --ignore-scripts && pnpm --dir ui-tui run build
 
       - name: Install ripgrep (prebuilt binary)
         run: |
@@ -402,16 +405,19 @@ jobs:
           git fetch --no-recurse-submodules upstream '+refs/tags/v20*:refs/tags/v20*'
 
       - name: Set up Node
-        # `hermes update` builds the web UI / TUI workspaces.
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # 7.0.0
+        # `hermes update` builds the web UI / TUI workspaces, and the install below runs
+        # under PM. setup-pm provides the locked Node, npm *and* pnpm: actions/setup-node
+        # has no `cache: pnpm` provider, and a setup-node binary on PATH is invisible to PM.
+        uses: ./.github/actions/setup-pm
         with:
-          node-version: 26
-          cache: npm
+          toolchain: node
 
       - name: Prepare shared Node dependencies for updater legs
         run: |
-          echo "HERMES_E2E_NODE_CACHE=$HOME/.npm" >> "$GITHUB_ENV"
-          npm ci --workspace ui-tui --workspace web --include-workspace-root --no-audit --no-fund
+          # _helpers.py maps this to NPM_CONFIG_CACHE for the sandboxed legs, so it must be
+          # the store the install below populates.
+          echo "HERMES_E2E_NODE_CACHE=${pnpm_config_store_dir:-$HOME/.local/share/pnpm/store}" >> "$GITHUB_ENV"
+          pnpm install --frozen-lockfile
 
       - name: Install ripgrep (prebuilt binary)
         run: |
