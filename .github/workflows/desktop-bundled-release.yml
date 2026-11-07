@@ -685,7 +685,7 @@ jobs:
         if: inputs.skip-tests != true
         shell: bash
         working-directory: apps/desktop
-        run: node ../../node_modules/vitest/vitest.mjs run --project electron scripts/payload-sign-cache.test.mjs scripts/batch-sign-binaries.test.mjs
+        run: node node_modules/vitest/vitest.mjs run --project electron scripts/payload-sign-cache.test.mjs scripts/batch-sign-binaries.test.mjs
 
       # Commit jobs share these steps but have read-only cache tokens.
       - name: Save verified payload signatures

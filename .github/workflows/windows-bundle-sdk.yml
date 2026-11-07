@@ -48,4 +48,4 @@ jobs:
         run: pnpm install --frozen-lockfile --filter "{./apps/desktop}..." --filter "{./tests-js}..." --ignore-scripts
       - name: Provision from an empty cache and execute the SDK
         working-directory: apps/desktop
-        run: node ../../node_modules/vitest/vitest.mjs run --project electron scripts/windows-bundle-tools.test.mjs scripts/msix-shared.test.mjs scripts/sign-msix.test.mjs scripts/batch-sign-binaries.test.mjs
+        run: node node_modules/vitest/vitest.mjs run --project electron scripts/windows-bundle-tools.test.mjs scripts/msix-shared.test.mjs scripts/sign-msix.test.mjs scripts/batch-sign-binaries.test.mjs

@@ -55,7 +55,7 @@ jobs:
       - name: Qualify the pinned native signing lifecycle
         working-directory: apps/desktop
         run: >-
-          node ../../node_modules/vitest/vitest.mjs run --project electron
+          node node_modules/vitest/vitest.mjs run --project electron
           scripts/mac-candidate-policy.test.mjs
           scripts/desktop-candidate-policy.test.mjs
           scripts/desktop-candidate-lifecycle.test.mjs
