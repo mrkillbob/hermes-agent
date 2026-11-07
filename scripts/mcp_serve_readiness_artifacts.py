@@ -16,8 +16,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Iterable
+
+# Run as a script, sys.path[0] is scripts/; repo-root packages (agent, hermes_cli) need the root.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 IDENTITY_SCHEMA = "hermes.identity.v1"
 QUALIFY_SCHEMA = "hermes.mcp.serve.qualify.v1"
