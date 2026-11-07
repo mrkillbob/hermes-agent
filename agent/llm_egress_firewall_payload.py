@@ -2,7 +2,10 @@
 
 from collections.abc import Mapping
 from typing import Any
+import base64
+import binascii
 import math
+import re
 
 
 def is_strict_sanitized_only_payload(
@@ -146,3 +149,34 @@ def append_snapshot_scan_inputs(snapshot_scans, scan_values, capture_origin):
     scan_values.extend(encoded_scans)
     for _ in encoded_scans:
         capture_origin("aggregate", None)
+
+
+# GitHub's legacy GraphQL global node id: base64 of a fixed
+# ``<digits>:<TypeName><digits>`` grammar (e.g. "05:Issue160502814" ->
+# "MDU6SXNzdWUxNjA1MDI4MTQ0"). `gh api` / `gh issue|pr list` return these in
+# every issue/PR/label/comment object's `node_id` field, so any tool-output
+# scan that fetches GitHub issue or PR data structurally contains them. They
+# are fixed, low-entropy protocol identifiers for public object identity —
+# not caller-supplied encoded content — so they get the same treatment as
+# the other bounded protocol grammars (call_/fc_ ids, kanban task ids,
+# prompt cache keys). Investigation for t_80e6f80b: this pattern was
+# repeatedly and falsely flagged as ``base64_payload`` on every provider
+# fallback from a local model to a REMOTE one mid-scan, permanently
+# excluding cloud fallback for any GitHub-issue-reading profile.
+_GITHUB_LEGACY_NODE_ID_GRAMMAR = re.compile(r"\A\d{1,3}:[A-Za-z]{2,40}\d{1,20}\Z")
+
+
+def looks_like_github_legacy_node_id(candidate: str) -> bool:
+    unpadded = candidate.rstrip("=")
+    if "=" in unpadded or len(unpadded) % 4 == 1:
+        return False
+    padded = unpadded + "=" * (-len(unpadded) % 4)
+    try:
+        decoded = base64.b64decode(padded.encode("ascii"), validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    try:
+        text = decoded.decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    return bool(_GITHUB_LEGACY_NODE_ID_GRAMMAR.fullmatch(text))
