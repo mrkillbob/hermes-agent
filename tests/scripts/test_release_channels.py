@@ -511,11 +511,15 @@ def test_accepted_release_receipts_feed_the_protected_head_without_rebuilding(tm
             channel_releases.match_accepted_packages(manifest, wrong)
         with pytest.raises(ChannelError, match="every native"):
             channel_releases.match_accepted_packages(dict(manifest, packages=manifest["packages"][:1]), accepted)
-        # An accepted release carrying an Intel Mac package cannot advance the channel: none ships.
-        intel = deepcopy(accepted)
-        intel["packages"].append({**next(row for row in intel["packages"] if row["platform"] == "macos"), "arch": "x64"})
+        # This fork ships the Intel Mac package: an accepted release (or a
+        # protected manifest) missing that row does not cover the channel.
+        def no_intel(rows):
+            return [row for row in rows if (row["platform"], row["arch"]) not in (("macos", "x64"), ("darwin", "x64"))]
+        lean = dict(accepted, packages=no_intel(accepted["packages"]))
         with pytest.raises(ChannelError, match="every native"):
-            channel_releases.match_accepted_packages(manifest, intel)
+            channel_releases.match_accepted_packages(manifest, lean)
+        with pytest.raises(ChannelError, match="every native"):
+            channel_releases.match_accepted_packages(dict(manifest, packages=no_intel(manifest["packages"])), accepted)
         # Exercise the real controller, HTTP receipt downloader, immutable feeds,
         # manifest and final CAS; only GitHub admission and generated product facts
         # are fixture inputs (no native signature acceptance is claimed here).

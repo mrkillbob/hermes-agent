@@ -11,9 +11,9 @@ import tempfile
 from hermes_cli.release_channels import ChannelReader, build_prefix, canonical_json, decode_json, require_sha256, validate_request
 from scripts.releases import commit_build, handoff, r2
 from scripts.releases.desktop_targets import MANIFEST_PLATFORM, NATIVE_LEGS, TARGETS
-REQUIRED_JOBS = ("validate", "build-darwin-arm64",
+REQUIRED_JOBS = ("validate", "build-darwin-arm64", "build-darwin-x64",
                  "build-win32-arm64", "build-win32-x64", "assemble-win32-bundle",
-                 "smoke-darwin-arm64",
+                 "smoke-darwin-arm64", "smoke-darwin-x64",
                  "smoke-win32-arm64", "smoke-win32-x64")
 
 

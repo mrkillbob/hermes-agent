@@ -120,12 +120,13 @@ def test_rejects_broken_legs_instead_of_publishing(kind):
         merge_mac_feeds(legs, "v0.28.0")
 
 
-def test_an_intel_leg_is_refused_because_no_intel_build_ships():
+def test_a_feed_missing_one_of_the_two_arch_legs_is_refused():
+    """The fork ships both macOS arches; a single leg is an incomplete feed."""
     legs, _bytes = _inputs()
     intel = legs["arm64-stable-mac.yml"].replace("mac-arm64", "mac-x64")
-    with pytest.raises(ValueError, match="ARM64"):
-        merge_mac_feeds({**legs, "x64-stable-mac.yml": intel}, "v0.28.0")
-    with pytest.raises(ValueError, match="ARM64"):
+    with pytest.raises(ValueError, match="ARM64 and one x64"):
+        merge_mac_feeds({"arm64-stable-mac.yml": legs["arm64-stable-mac.yml"]}, "v0.28.0")
+    with pytest.raises(ValueError, match="ARM64 and one x64"):
         merge_mac_feeds({"x64-stable-mac.yml": intel}, "v0.28.0")
 
 
