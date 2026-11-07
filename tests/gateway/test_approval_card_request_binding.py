@@ -75,6 +75,10 @@ async def _press_feishu_card(request_id):
     adapter = FeishuAdapter(PlatformConfig(enabled=True))
     adapter._client = MagicMock()
     adapter.set_authorization_check(lambda *_a, **_k: True)
+    # Fork group policy (adapter._is_interactive_operator_authorized): card clicks are judged
+    # by the admin/allow-list first and the session key's shape second; this fixture's
+    # non-feishu SESSION never reaches the DM gate, so admit the operator by allow-list.
+    adapter._allowed_group_users = {"ou_1"}
     sent = SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id="m1"))
     with patch.object(adapter, "_feishu_send_with_retry", new=AsyncMock(return_value=sent)), \
             patch.object(adapter, "send", new=AsyncMock()):

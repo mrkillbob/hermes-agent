@@ -41,6 +41,9 @@ def adapter(monkeypatch):
     with cg._lock:
         cg._entries.clear()
         cg._session_index.clear()
+    # Fork posture (webhook_ingress._authentication_error): a webhook with no auth
+    # configured is rejected 401, so exercise the tap with a verification token.
+    monkeypatch.setenv("FEISHU_VERIFICATION_TOKEN", "test-token")
     a = FeishuAdapter(PlatformConfig(enabled=True))
     a._client = MagicMock()
     a._allowed_group_users = {"ou_ok"}
@@ -139,7 +142,7 @@ class _Body:
 
 
 async def _webhook_tap(a, value, open_id="ou_ok"):
-    body = json.dumps({"schema": "2.0", "header": {"event_type": "card.action.trigger"}, "event": {
+    body = json.dumps({"schema": "2.0", "header": {"token": "test-token", "event_type": "card.action.trigger"}, "event": {
         "operator": {"open_id": open_id}, "context": {"open_chat_id": CHAT},
         "action": {"tag": "button", "value": value}}}).encode()
     response = await a._handle_webhook_request(

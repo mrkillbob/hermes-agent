@@ -135,6 +135,11 @@ async def _handle_admitted_request(adapter: Any, request: Any) -> Any:
         return adapter._webhook_reject(remote_ip, "429", 429, "Too Many Requests")
     adapter._clear_webhook_anomaly(remote_ip)
     event_type = str((payload.get("header") or {}).get("event_type") or "")
+    if event_type == "card.action.trigger":
+        # Card taps must answer with the settled card as the HTTP body: in webhook mode that
+        # inline reply is the only reliable way to sync all clients, and the fixed {code:0}
+        # reply would drop it. Token/signature checks above still run first.
+        return feishu.web.json_response(adapter._on_webhook_card_action(payload))
     data = adapter._namespace_from_mapping(payload)
     if event_type in {"im.message.reaction.created_v1", "im.message.reaction.deleted_v1"}:
         adapter._on_reaction_event(event_type, data)
