@@ -115,10 +115,10 @@ const BUILDINGS: Array<[id: string, role: string, textureSet: string, tags: stri
   ['library', 'knowledge', 'library-facade', ['books', 'violet', 'leader-home']],
   ['research-lab', 'research', 'research-facade', ['lab', 'cyan', 'leader-home']],
   ['arts-studio', 'creative', 'studio-facade', ['art', 'green', 'leader-home']],
-  ['council-hall', 'governance', 'council-facade', ['council', 'violet', 'leader-home']],
+  ['council-hall', 'governance', 'council-facade', ['council', 'info.area', 'agent.info', 'celebration.local', 'agent.success', 'violet', 'leader-home']],
   ['engineering-workshop', 'engineering', 'engineering-facade', ['tools', 'cyan', 'leader-home']],
   ['triage-clinic', 'medical', 'clinic-facade', ['medical', 'amber', 'leader-home']],
-  ['review-office', 'review', 'review-facade', ['review', 'violet', 'leader-home']],
+  ['review-office', 'review', 'review-facade', ['review', 'review.closed', 'pr.closed', 'pr.review_requested', 'violet', 'leader-home']],
   ['archive', 'archive', 'archive-facade', ['archive', 'violet', 'leader-home']]
 ]
 
