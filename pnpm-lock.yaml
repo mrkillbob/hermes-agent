@@ -163,6 +163,12 @@ importers:
       '@audiowave/react':
         specifier: 0.6.2
         version: 0.6.2(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      '@babylonjs/core':
+        specifier: 9.21.2
+        version: 9.21.2
+      '@babylonjs/loaders':
+        specifier: 9.21.2
+        version: 9.21.2(@babylonjs/core@9.21.2)(babylonjs-gltf2interface@9.32.0)
       '@chenglou/pretext':
         specifier: 0.0.9
         version: 0.0.9
@@ -349,6 +355,9 @@ importers:
       react-shiki:
         specifier: 0.11.2
         version: 0.11.2(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(supports-color@10.2.2)
+      recast-detour:
+        specifier: 1.6.4
+        version: 1.6.4
       remark-math:
         specifier: 6.0.0
         version: 6.0.0(supports-color@10.2.2)
@@ -398,6 +407,9 @@ importers:
       '@babel/core':
         specifier: 8.0.7
         version: 8.0.7
+      '@babylonjs/serializers':
+        specifier: 9.21.2
+        version: 9.21.2(@babylonjs/core@9.21.2)(babylonjs-gltf2interface@9.32.0)
       '@electron/asar':
         specifier: 4.1.1
         version: 4.1.1
@@ -1046,6 +1058,21 @@ packages:
   '@babel/types@8.0.6':
     resolution: {integrity: sha512-c+xgSWboV2pdwXP67BUWDVRHi2BO5Q3KwxyFVs7taVTY+fsK47/L51ZXQoV9rozHJDNHvJ4v4WEsI/IlxV2l2A==}
     engines: {node: ^22.18.0 || >=24.11.0}
+
+  '@babylonjs/core@9.21.2':
+    resolution: {integrity: sha512-y4brONcZ4X5rfoiLqTdd9jSZzyIeJ+zHhvN6qgDCpgVIyM2sJlCouLBSvNn+Kl7jIxmzJhIvbBvUIS/sx8jFUw==}
+
+  '@babylonjs/loaders@9.21.2':
+    resolution: {integrity: sha512-ZPfVpNBbxZhL3Xns355gyIFBfEgq4qGAbW/Rf5rwvkivTbQcKQRTmp+GTieTdPtEcPGBTSBVFnr/LioKEmJlvQ==}
+    peerDependencies:
+      '@babylonjs/core': ^9.0.0
+      babylonjs-gltf2interface: ^9.0.0
+
+  '@babylonjs/serializers@9.21.2':
+    resolution: {integrity: sha512-qbBMUQDCRrv5RBIj5/JZY1lFVGOGHDQ7xbBVcKibT1cSXBXU1bkXHAAEa/ATOa+N3m6YgPBAAxe8yQ9C/cZJ6Q==}
+    peerDependencies:
+      '@babylonjs/core': ^9.0.0
+      babylonjs-gltf2interface: ^9.0.0
 
   '@bramus/specificity@2.4.3':
     resolution: {integrity: sha512-0GEz8qJWokkUVYQYRukmkSHIFNoBH8QTreeHrAFbvz1XFYc3Y+puhMs8PQ5x8GNugiC2l5jvDBXKLbBIByeSBw==}
@@ -2885,6 +2912,9 @@ packages:
   '@types/deep-eql@4.0.2':
     resolution: {integrity: sha512-c9h9dVVMigMPc4bwTvC5dxqtqJZwQPePsWjPlpSOnojbor6pGqdk541lfA7AqFQr5pB1BRdq0juY9db81BwyFw==}
 
+  '@types/emscripten@1.41.6':
+    resolution: {integrity: sha512-uN+9i8bFT5CUcZfyIEYDrSueACEyKGbUs5kC/72DGlZZoinh84sJfVV0i8UOJD1asdzkvLPBRrKs41kZ8MdEXg==}
+
   '@types/esrecurse@4.3.1':
     resolution: {integrity: sha512-xJBAbDifo5hpffDBuHl0Y8ywswbiAp/Wi7Y/GtAgSlZyIABppyurxVueOPE8LUQOxdlgi6Zqce7uoEpqNTeiUw==}
 
@@ -3251,6 +3281,9 @@ packages:
 
   babel-plugin-react-compiler@1.0.0:
     resolution: {integrity: sha512-Ixm8tFfoKKIPYdCCKYTsqv+Fd4IJ0DQqMyEimo+pxUOMUR9cVPlwTrFt9Avu+3cb6Zp3mAzl+t1MrG2fxxKsxw==}
+
+  babylonjs-gltf2interface@9.32.0:
+    resolution: {integrity: sha512-ANCt1Watb93re9XI3P0N05OrdGmS5jyfV+L+/+3/Pu+ye7ttC++7KdmM8JU7vCXKnrnK8G1vPJNUlVgRN3rVhw==}
 
   bail@2.0.2:
     resolution: {integrity: sha512-0xO6mYd7JB2YesxDKplafRpsiOzPt9V02ddPCLbY1xYGPOX24NTyN50qnUxgCPcSoYMhKpAuBTjQoRZCAkUDRw==}
@@ -5544,6 +5577,9 @@ packages:
     resolution: {integrity: sha512-9u/sniCrY3D5WdsERHzHE4G2YCXqoG5FTHUiCC4SIbr6XcLZBY05ya9EKjYek9O5xOAwjGq+1JdGBAS7Q9ScoA==}
     engines: {node: '>= 6'}
 
+  recast-detour@1.6.4:
+    resolution: {integrity: sha512-OwR6NvFuzZZa3umVT8FX+UdhXtHMVXZuvcGiEk7qYaCUUVLIIKX0rrNarb7l0N4kW2ENVGbc6v0WpuNG5X2+iQ==}
+
   redux@4.2.1:
     resolution: {integrity: sha512-LAUYz4lc+Do8/g7aeRa8JkyDErK6ekstQaqWQrNRW//MY1TvCEpMtpTWvlQ+FPbWCx+Xixu/6SHt5N0HR+SB4w==}
 
@@ -6770,6 +6806,18 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 8.0.6
       '@babel/helper-validator-identifier': 8.0.6
+
+  '@babylonjs/core@9.21.2': {}
+
+  '@babylonjs/loaders@9.21.2(@babylonjs/core@9.21.2)(babylonjs-gltf2interface@9.32.0)':
+    dependencies:
+      '@babylonjs/core': 9.21.2
+      babylonjs-gltf2interface: 9.32.0
+
+  '@babylonjs/serializers@9.21.2(@babylonjs/core@9.21.2)(babylonjs-gltf2interface@9.32.0)':
+    dependencies:
+      '@babylonjs/core': 9.21.2
+      babylonjs-gltf2interface: 9.32.0
 
   '@bramus/specificity@2.4.3':
     dependencies:
@@ -8767,6 +8815,8 @@ snapshots:
 
   '@types/deep-eql@4.0.2': {}
 
+  '@types/emscripten@1.41.6': {}
+
   '@types/esrecurse@4.3.1': {}
 
   '@types/estree-jsx@1.0.5':
@@ -9203,6 +9253,8 @@ snapshots:
   babel-plugin-react-compiler@1.0.0:
     dependencies:
       '@babel/types': 7.29.8
+
+  babylonjs-gltf2interface@9.32.0: {}
 
   bail@2.0.2: {}
 
@@ -11939,6 +11991,10 @@ snapshots:
       string_decoder: 1.1.1
       util-deprecate: 1.0.2
     optional: true
+
+  recast-detour@1.6.4:
+    dependencies:
+      '@types/emscripten': 1.41.6
 
   redux@4.2.1:
     dependencies:

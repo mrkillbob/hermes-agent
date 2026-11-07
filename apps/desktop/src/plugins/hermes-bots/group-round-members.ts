@@ -330,7 +330,7 @@ export async function runGroupRoundMember(
     })
   }
 
-  return publishGroupMemberReply(context, member, memberKey, thread, reply, markKey)
+  return publishGroupMemberReply(context, member, memberKey, thread, reply, markKey, owesAnswer)
 }
 
 function recordGroupMemberFailure(
@@ -360,7 +360,8 @@ function publishGroupMemberReply(
   memberKey: string,
   thread: string,
   reply: null | string,
-  markKey: string
+  markKey: string,
+  owesAnswer: boolean
 ): boolean {
   const spoke = reply !== null && !isGroupPassText(reply)
 

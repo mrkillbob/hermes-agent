@@ -118,7 +118,7 @@ describe.each([false, true])('dismissOnConfirm=%s', dismissOnConfirm => {
 // The confirm action itself can unmount the dialog's owner (disbanding a group
 // room closes the room view). The await in run() then resolves after cleanup
 // already ran, so a timer armed at that point had nobody left to clear it.
-test('a confirm that unmounts the dialog before it resolves never arms the close timer', async () => {
+it('a confirm that unmounts the dialog before it resolves never arms the close timer', async () => {
   vi.useFakeTimers()
   const onClose = vi.fn()
 
