@@ -1,0 +1,26 @@
+{
+  "trace_id": "redacted-sample",
+  "task": {"class": "analysis", "size": "small"},
+  "allowance_check": {
+    "source_files": [
+      "plugin-catalog/quota.yaml",
+      "plugin-catalog/model-usage-status.yaml"
+    ],
+    "openrouter:thinkingmachines/inkling-small:free": {"eligible": true, "remaining": ">0"}
+  },
+  "route_selected": {
+    "provider": "openrouter",
+    "model": "thinkingmachines/inkling-small:free",
+    "reasoning": "medium",
+    "profile": null
+  },
+  "budget_enforcement": {
+    "policy": "outside-plugin summary-cap",
+    "applied": true,
+    "truncated": false
+  },
+  "fallbacks_considered": [
+    {"provider": "llamacpp", "model": "Devstral-Small-2-24B Q4_K_M", "used": false}
+  ],
+  "secrets_used": false
+}

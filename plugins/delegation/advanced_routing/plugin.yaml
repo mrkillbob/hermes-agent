@@ -1,0 +1,5 @@
+name: advanced-routing
+version: 1.1.0
+description: "Advanced Delegation 1.1.0: task-class based routing across local/cloud models and profiles with budget/allowance guardrails and graceful fallback."
+author: NousResearch
+kind: standalone
