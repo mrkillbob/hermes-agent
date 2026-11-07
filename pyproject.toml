@@ -573,6 +573,7 @@ dev = [
 test = [
   "distlib==0.4.4; sys_platform == 'win32'",
   "anthropic==0.125.0",
+  "pyyaml==6.0.3",
 ]
 
 [build-system]
