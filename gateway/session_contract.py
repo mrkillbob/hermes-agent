@@ -17,6 +17,10 @@ class SessionActor:
     transport_id: str
 
 
+# Upstream renamed Principal -> SessionActor; fork tests still import the old name.
+Principal = SessionActor
+
+
 @dataclass(frozen=True)
 class SessionRef:
     profile_id: str
