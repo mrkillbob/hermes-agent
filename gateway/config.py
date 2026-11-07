@@ -344,6 +344,8 @@ PORT_BINDING_CONDITIONAL_MODES: dict[str, str] = {"feishu": "webhook"}
 # Port-binders whose profile-prefixed surface is mirrored by the default adapter.
 SHARED_LISTENER_MIRROR_PLATFORMS = frozenset({"api_server", "webhook"})
 SHARED_LISTENER_MIRROR_PATHS: dict[str, str] = {"api_server": "/v1", "webhook": "/webhooks/<route>"}
+# Mirror platforms whose served record is additionally keyed by profile (relay included).
+SERVED_PROFILE_MIRROR_PLATFORMS = SHARED_LISTENER_MIRROR_PLATFORMS | frozenset({"relay"})
 
 
 def platform_binds_port(platform_value: str, extra: Optional[dict] = None) -> bool:

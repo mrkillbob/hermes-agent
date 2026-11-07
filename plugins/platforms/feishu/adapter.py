@@ -2846,6 +2846,17 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
 
         return await handle_webhook_request(self, request)
 
+    # Webhook event_type -> handler method name (reaction events are routed separately).
+    _WEBHOOK_EVENT_HANDLERS = {
+        "im.message.receive_v1": "_on_message_event",
+        "im.message.message_read_v1": "_on_message_read_event",
+        "im.chat.member.bot.added_v1": "_on_bot_added_to_chat",
+        "im.chat.member.bot.deleted_v1": "_on_bot_removed_from_chat",
+        "card.action.trigger": "_on_card_action_trigger",
+        "drive.notice.comment_add_v1": "_on_drive_comment_event",
+        "vc.bot.meeting_invited_v1": "_on_meeting_invited_event",
+    }
+
     def _is_webhook_signature_valid(self, headers: Any, body_bytes: bytes) -> bool:
         """Timing-safe check of x-lark-signature == SHA256(timestamp + nonce + encrypt_key + body)."""
         timestamp, nonce, signature = (

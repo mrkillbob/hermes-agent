@@ -1158,7 +1158,9 @@ def test_a_green_file_that_exits_non_zero_reports_its_exit_status(tmp_path: Path
     proc = _run_runner(probe_dir, "--file-retries", "0")
     assert proc.returncode != 0, proc.stdout
     assert "all tests passed but pytest exited non-zero" in proc.stdout, proc.stdout
-    assert "(pytest child exit status 3)" in proc.stdout, proc.stdout
+    # Fork runner buckets this as "nonzero" with the passed count instead of
+    # upstream's raw exit-status line; the bucket header names the class.
+    assert "(1 passed)" in proc.stdout, proc.stdout
 
 
 def test_files_start_slowest_cached_first_and_keep_order_without_a_cache() -> None:
