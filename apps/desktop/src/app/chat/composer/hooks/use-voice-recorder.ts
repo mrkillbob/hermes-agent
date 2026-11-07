@@ -180,6 +180,10 @@ export function useVoiceRecorder({
       return
     }
 
+    if (dictationRef.current) {
+      return
+    }
+
     const owner = resolveOwnerNow(ownerRef.current)
     let dictation: Dictation
     const stream = liveStream(owner, text => {
@@ -189,14 +193,6 @@ export function useVoiceRecorder({
     })
     dictation = { cancelLive: stream.cancel, live: stream.session, owner, warmup: Promise.resolve() }
     // Publish before mic startup: unmount must retire pending stream opens too.
-    dictationRef.current = dictation
-    if (dictationRef.current) {
-      return
-    }
-
-    const owner = resolveOwnerNow(ownerRef.current)
-    const stream = liveStream(owner)
-    const dictation: Dictation = { live: stream.session, owner, warmup: Promise.resolve() }
     dictationRef.current = dictation
 
     try {

@@ -38,7 +38,6 @@ import { AllowlistInput } from "@/components/AllowlistInput";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { cn, themedBody } from "@/lib/utils";
-import { errorMessage } from "@/lib/api-error";
 import { RelayLinkPanel } from "./ChannelsRelayLink";
 
 // State → badge mapping. The backend emits a small, fixed vocabulary plus

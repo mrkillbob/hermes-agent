@@ -53,7 +53,6 @@ import {
 import { terminalCompletionState } from './completion-terminal-state'
 import { useGatewayEventHandler } from './gateway-event'
 import { handleServerRequest as dispatchServerRequest } from './gateway-event/server-requests'
-import { bindStoppedTurnReceipt, extendInterruptedReply } from './interrupted-reply'
 import { isPersistedInterimCompletion } from './persisted-completion'
 import { bindReceiptUserRows } from './receipt-user-rows'
 import { currentResponseParts, mergeCurrentResponseText } from './response-parts'
@@ -65,13 +64,6 @@ import {
   type SegmentStamp
 } from './segment-identity'
 import { completionErrorText, delegateTaskPayloads, MAX_STREAM_FLUSH_GAP_MS, STREAM_DELTA_FLUSH_MS } from './utils'
-import { admitSegmentDelta, admitSegmentSeal, type SegmentCursor, type SegmentStamp } from './segment-identity'
-import {
-  completionErrorText,
-  delegateTaskPayloads,
-  MAX_STREAM_FLUSH_GAP_MS,
-  STREAM_DELTA_FLUSH_MS
-} from './utils'
 
 interface MessageStreamOptions {
   activeGatewayProfile?: string
