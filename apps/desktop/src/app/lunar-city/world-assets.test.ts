@@ -62,6 +62,26 @@ describe('Lunar City asset manifest', () => {
     expect(LUNAR_CITY_ASSET_MANIFEST.validation.requires).toContain('buildings_do_not_overlap')
   })
 
+  it('backs stale-worker semantics with character tags and a dedicated task lantern', () => {
+    const workers = LUNAR_CITY_ASSET_MANIFEST.assets.filter(
+      asset => asset.kind === 'character' && asset.id.startsWith('worker-')
+    )
+    const lantern = LUNAR_CITY_ASSET_MANIFEST.assets.find(asset => asset.id === 'task-lantern-stalled')
+
+    expect(workers.length).toBeGreaterThan(0)
+    for (const worker of workers) {
+      expect(worker.visualTags).toEqual(expect.arrayContaining(['stale', 'heartbeat-stalled']))
+    }
+    expect(lantern).toMatchObject({
+      collection: 'Props',
+      id: 'task-lantern-stalled',
+      instanced: false,
+      kind: 'prop',
+      textureSet: 'signal-lantern',
+      visualTags: ['stale', 'heartbeat-stalled']
+    })
+  })
+
   it('maps every role visual identity to a home building or scene object', () => {
     const buildings = new Set(
       LUNAR_CITY_ASSET_MANIFEST.assets.filter(asset => asset.kind === 'building' || asset.kind === 'prop').map(asset => asset.id)
