@@ -134,12 +134,12 @@ const LEADERS: Array<[id: string, role: string, homeBuilding: string, tags: stri
 ]
 
 const WORKERS: Array<[id: string, role: string, homeBuilding: string, tags: string[]]> = [
-  ['worker-audit', 'audit', 'review-office', ['worker', 'inspection', 'methodical']],
-  ['worker-operations', 'operations', 'engineering-workshop', ['worker', 'operations', 'protective']],
-  ['worker-release', 'release', 'triage-clinic', ['worker', 'release', 'bold']],
-  ['worker-research', 'research', 'research-lab', ['worker', 'research', 'curious']],
-  ['worker-review', 'review', 'review-office', ['worker', 'review', 'methodical']],
-  ['worker-support', 'support', 'council-hall', ['worker', 'support', 'social']]
+  ['worker-audit', 'audit', 'review-office', ['worker', 'inspection', 'methodical', 'stale', 'heartbeat-stalled']],
+  ['worker-operations', 'operations', 'engineering-workshop', ['worker', 'operations', 'protective', 'stale', 'heartbeat-stalled']],
+  ['worker-release', 'release', 'triage-clinic', ['worker', 'release', 'bold', 'stale', 'heartbeat-stalled']],
+  ['worker-research', 'research', 'research-lab', ['worker', 'research', 'curious', 'stale', 'heartbeat-stalled']],
+  ['worker-review', 'review', 'review-office', ['worker', 'review', 'methodical', 'stale', 'heartbeat-stalled']],
+  ['worker-support', 'support', 'council-hall', ['worker', 'support', 'social', 'stale', 'heartbeat-stalled']]
 ]
 
 const CHILDREN: Array<[id: string, role: string, homeBuilding: string, tags: string[]]> = [

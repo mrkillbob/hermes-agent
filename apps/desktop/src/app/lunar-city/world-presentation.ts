@@ -289,10 +289,44 @@ const SCENES: Record<string, SceneSpec> = {
     intensity: 1,
     npcState: 'returning',
     sceneTag: 'activity.worksite.closed'
+  },
+  'worker.stale': {
+    animationTags: ['worker.stale', 'heartbeat.stalled', 'inspect', 'waiting'],
+    cameraBeat: 'worker_discovery',
+    intensity: 1,
+    npcState: 'waiting',
+    sceneTag: 'crisis.worker.stale',
+    soundTag: 'alert.warning'
+  },
+  'pr.closed': {
+    animationTags: ['pr.closed', 'review.closed'],
+    intensity: 1,
+    npcState: 'walking',
+    sceneTag: 'activity.pr.closed',
+    soundTag: 'alert.info'
+  },
+  'pr.review_requested': {
+    animationTags: ['pr.review_requested', 'inspect'],
+    intensity: 1,
+    npcState: 'inspecting',
+    sceneTag: 'activity.pr.review_requested',
+    soundTag: 'alert.info'
+  },
+  'agent.success': {
+    animationTags: ['agent.success', 'celebration.local'],
+    intensity: 1,
+    npcState: 'celebrating',
+    sceneTag: 'milestone.agent.success'
+  },
+  'agent.info': {
+    animationTags: ['agent.info', 'resting'],
+    intensity: 0,
+    npcState: 'resting',
+    sceneTag: 'activity.agent.info'
   }
 }
 
-const FALLBACK_SCENE: SceneSpec = {
+export const FALLBACK_SCENE: SceneSpec = {
   animationTags: ['alert'],
   intensity: 1,
   npcState: 'inspecting',
