@@ -1880,7 +1880,7 @@ def test_content_free_violation_locations_never_return_keys_or_values():
     encoded = base64.b64encode(b"encoded private detail").decode("ascii")
     result = content_free_violation_locations(
         {
-            "private-key-name": [{"content-key": private_path}],
+            "private-Key-name": [{"content-key": private_path}],
             "metadata-key": encoded,
             "credential": "token=secret-value-123456789",
         }
@@ -1892,7 +1892,7 @@ def test_content_free_violation_locations_never_return_keys_or_values():
         ("$.map[1].value", ("base64_payload",)),
         ("$.map[2].value", ("secret_detected",)),
     )
-    assert "private-key-name" not in rendered
+    assert "private-Key-name" not in rendered
     assert "content-key" not in rendered
     assert "metadata-key" not in rendered
     assert private_path not in rendered

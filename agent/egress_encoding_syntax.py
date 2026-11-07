@@ -7,6 +7,20 @@ import re
 
 
 _ISO_CALENDAR_WEEK = re.compile(r"[0-9]{4}-W[0-9]{2}\Z")
+_HYPHENATED_PROSE_WORD = re.compile(r"\A[a-z]+(?:-[a-z]+)*-?\Z")
+
+
+def is_hyphenated_prose_word(candidate: str) -> bool:
+    """Recognize lowercase hyphenated compounds and arrow-truncated words.
+
+    Live incident, 2026-08-31: the kanban dispatcher's own worker prompt
+    template contains compounds like "unavailable-evidence" and fragments
+    like "execute-" that sit in the base64url alphabet and round-trip as
+    unpadded encodings by arithmetic coincidence, so every kanban worker was
+    eligible for a false-positive egress block. Mixed case, digits, or
+    underscores stay eligible for canonical decoding.
+    """
+    return _HYPHENATED_PROSE_WORD.fullmatch(candidate) is not None
 
 
 def is_iso_calendar_week(candidate: str) -> bool:

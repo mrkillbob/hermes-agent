@@ -8,8 +8,6 @@ an immutable block decision.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import ipaddress
 import json
 import math
@@ -26,6 +24,7 @@ from urllib.parse import urlsplit
 
 from agent.llm_egress_receipt_metadata import receipt_envelope
 from agent.llm_egress_context_atoms import PUBLIC_CONTEXT_ATOMS, canonical_chunked_context_atom
+from agent.llm_egress_firewall_payload import looks_like_github_legacy_node_id
 from agent.file_safety import get_read_block_error
 from agent.egress_source_annotations import mask_builtin_annotations
 from agent.cross_process_file_lock import (
@@ -34,7 +33,11 @@ from agent.cross_process_file_lock import (
 )
 from agent.redact import redact_sensitive_text
 from agent.source_fixed_literals import _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS
-from agent.egress_encoding_syntax import is_canonical_base64_encoding, is_iso_calendar_week
+from agent.egress_encoding_syntax import (
+    is_canonical_base64_encoding,
+    is_hyphenated_prose_word,
+    is_iso_calendar_week,
+)
 from agent.egress_tool_syntax import validate_tool_syntax
 from agent.native_metadata_egress import NativeMetadataSegment, _render_bounded_sanitized
 
@@ -883,6 +886,10 @@ def _canonical_base64_candidate(candidate: str) -> bool:
             return False
         if _BOUNDED_SLASH_WORDS.fullmatch(candidate):
             return False
+        # Hyphenated prose compounds ("unavailable-evidence") and arrow
+        # fragments ("execute-") from live worker prompts also round-trip.
+        if is_hyphenated_prose_word(candidate):
+            return False
     # Short, word-like URL-safe slugs are common model/provider identifiers.
     # Keep genuinely encoding-shaped values such as ``-_8A`` eligible for the
     # canonical decoder below.
@@ -948,37 +955,6 @@ def _canonical_chunked_base64_candidate(candidate: str) -> bool:
     if len(chunks) < 8 and not has_encoding_signal:
         return False
     return canonical_chunked_context_atom(joined, _canonical_base64_candidate)
-
-
-# GitHub's legacy GraphQL global node id: base64 of a fixed
-# ``<digits>:<TypeName><digits>`` grammar (e.g. "05:Issue160502814" ->
-# "MDU6SXNzdWUxNjA1MDI4MTQ0"). `gh api` / `gh issue|pr list` return these in
-# every issue/PR/label/comment object's `node_id` field, so any tool-output
-# scan that fetches GitHub issue or PR data structurally contains them. They
-# are fixed, low-entropy protocol identifiers for public object identity —
-# not caller-supplied encoded content — so they get the same treatment as
-# the other bounded protocol grammars above (call_/fc_ ids, kanban task ids,
-# prompt cache keys). Investigation for t_80e6f80b: this pattern was
-# repeatedly and falsely flagged as ``base64_payload`` on every provider
-# fallback from a local model to a REMOTE one mid-scan, permanently
-# excluding cloud fallback for any GitHub-issue-reading profile.
-_GITHUB_LEGACY_NODE_ID_GRAMMAR = re.compile(r"\A\d{1,3}:[A-Za-z]{2,40}\d{1,20}\Z")
-
-
-def _looks_like_github_legacy_node_id(candidate: str) -> bool:
-    unpadded = candidate.rstrip("=")
-    if "=" in unpadded or len(unpadded) % 4 == 1:
-        return False
-    padded = unpadded + "=" * (-len(unpadded) % 4)
-    try:
-        decoded = base64.b64decode(padded.encode("ascii"), validate=True)
-    except (binascii.Error, ValueError):
-        return False
-    try:
-        text = decoded.decode("ascii")
-    except UnicodeDecodeError:
-        return False
-    return bool(_GITHUB_LEGACY_NODE_ID_GRAMMAR.fullmatch(text))
 
 
 def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> bool:
@@ -1050,8 +1026,8 @@ def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> b
             # value: the literal ``pck_`` prefix plus exactly 96 bits of hex.
             if _PROMPT_CACHE_KEY.fullmatch(candidate):
                 continue
-            # GitHub's legacy global node id (see helper docstring above).
-            if _looks_like_github_legacy_node_id(candidate):
+            # GitHub's legacy global node id (see helper in the payload sibling).
+            if looks_like_github_legacy_node_id(candidate):
                 continue
             if _canonical_literal_base64_candidate(candidate):
                 return True
