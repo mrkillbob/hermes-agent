@@ -78,6 +78,43 @@ def _git(repo_root: Path, *args: str, timeout: int) -> subprocess.CompletedProce
     )
 
 
+_NETWORK_GIT_VERBS = frozenset({"fetch", "clone", "pull", "push", "ls-remote"})
+
+
+def _remote_url(repo_root: Path, args: tuple[str, ...]) -> str:
+    """URL a network verb talks to: an explicit URL argument, else the first positional remote
+    name's configured URL; empty when neither resolves, which keeps credential fallback off."""
+    for arg in args[1:]:
+        if arg.startswith("-"):
+            continue
+        if "://" in arg or arg.endswith(".git"):
+            return arg
+        resolved = _git(repo_root, "remote", "get-url", arg, timeout=20)
+        return resolved.stdout.strip() if resolved.returncode == 0 else ""
+    return ""
+
+
+def _git_with_stored_credentials(repo_root: Path, *args: str, timeout: int) -> subprocess.CompletedProcess:
+    """``_git`` for callables that may hit a remote: the verb runs anonymously first and, when the
+    remote refuses, retries with the user's stored credential (private HTTPS bases).
+
+    The hardened ``_git`` env deliberately disables credential helpers (GHSA-7x36-8jrh-v4pw), so a
+    private HTTPS base could never authenticate there; ``run_git_with_credential_fallback`` injects
+    the user's own token through the env config channel instead, which survives that isolation.
+    Same pattern as ``plugins_cmd_git._run_plugin_git``.
+    """
+    if not args or args[0] not in _NETWORK_GIT_VERBS:
+        return _git(repo_root, *args, timeout=timeout)
+    from hermes_cli._subprocess_compat import FILTER_DISCOVERY_FAILED, noninteractive_repo_git_env
+    from hermes_cli.git_credentials import run_git_with_credential_fallback
+    env = noninteractive_repo_git_env(repo_root)
+    if env is None:
+        return subprocess.CompletedProcess(["git", "-C", str(repo_root), *args], 1, "", FILTER_DISCOVERY_FAILED)
+    return run_git_with_credential_fallback(
+        ["git", "-C", str(repo_root), *args], _remote_url(repo_root, args), env=env,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+
+
 def _has_active_children(conn: sqlite3.Connection, task_id: str) -> bool:
     return conn.execute(_ACTIVE_CHILDREN_SQL, (task_id,)).fetchone() is not None
 
@@ -846,7 +883,7 @@ def _configured_worktree_base(repo_root: Path) -> Optional[str]:
     if not isinstance(ref, str) or not ref.strip() or ref.startswith("-"):
         raise ValueError("configured Kanban worktree base must be a Git ref")
     from hermes_cli.kanban_worktree_policy import refresh_configured_remote_base
-    refresh_configured_remote_base(repo_root, ref, _git)
+    refresh_configured_remote_base(repo_root, ref, _git_with_stored_credentials)
     result = _git(repo_root, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}", timeout=20)
     if result.returncode:
         raise ValueError(f"configured Kanban worktree base does not resolve: {ref}")
