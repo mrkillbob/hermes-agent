@@ -49,7 +49,38 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          python3 -c "import json, os, importlib; os.environ['HERMES_MCP_READONLY']='1'; m=importlib.import_module('agent.transports.hermes_tools_mcp_server');\nfrom importlib import import_module as _imp;\ntry:\n    _get_prof=_imp('hermes_cli.profiles').get_active_profile_name; profile=str(_get_prof() or 'default')\nexcept Exception:\n    profile='default'\nidentity={'schema':'hermes.identity.v1','profile':profile,'task_id':os.getenv('HERMES_TASK_ID'),'session_id':os.getenv('HERMES_SESSION_ID'),'turn_id':os.getenv('HERMES_TURN_ID'),'api_request_id':os.getenv('HERMES_API_REQUEST_ID')};\nopen('artifacts/identity.json','w').write(json.dumps(identity, indent=2));\nreadonly_tools=sorted(set(m._profile_scoped_exposed_tools()));\nqual={'schema':'hermes.mcp.serve.qualify.v1','pin':'1.0.0','readonly_tools':readonly_tools,'notes':['Approvals disabled; ESTOP preserved','Profile-scoped allowlist active when profile in {test, a2a-test} or HERMES_MCP_READONLY=1']};\nopen('artifacts/qualify.json','w').write(json.dumps(qual, indent=2));\nprint('Wrote artifacts/identity.json and artifacts/qualify.json')"
+          python3 - <<'PY'
+          import json, os, importlib
+          os.environ['HERMES_MCP_READONLY'] = '1'
+          m = importlib.import_module('agent.transports.hermes_tools_mcp_server')
+          from importlib import import_module as _imp
+          try:
+              _get_prof = _imp('hermes_cli.profiles').get_active_profile_name
+              profile = str(_get_prof() or 'default')
+          except Exception:
+              profile = 'default'
+          identity = {
+              'schema': 'hermes.identity.v1',
+              'profile': profile,
+              'task_id': os.getenv('HERMES_TASK_ID'),
+              'session_id': os.getenv('HERMES_SESSION_ID'),
+              'turn_id': os.getenv('HERMES_TURN_ID'),
+              'api_request_id': os.getenv('HERMES_API_REQUEST_ID'),
+          }
+          open('artifacts/identity.json', 'w').write(json.dumps(identity, indent=2))
+          readonly_tools = sorted(set(m._profile_scoped_exposed_tools()))
+          qual = {
+              'schema': 'hermes.mcp.serve.qualify.v1',
+              'pin': '1.0.0',
+              'readonly_tools': readonly_tools,
+              'notes': [
+                  'Approvals disabled; ESTOP preserved',
+                  'Profile-scoped allowlist active when profile in {test, a2a-test} or HERMES_MCP_READONLY=1',
+              ],
+          }
+          open('artifacts/qualify.json', 'w').write(json.dumps(qual, indent=2))
+          print('Wrote artifacts/identity.json and artifacts/qualify.json')
+          PY
 
       - name: Upload artifacts
         if: always()
