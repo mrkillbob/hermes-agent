@@ -89,11 +89,21 @@ class TestDatabaseClientCredentials:
             assert redact_terminal_output(line, "cat app.py", force=True) == line
 
     @pytest.mark.parametrize("text", ["PWD=/home/app/project", "PGPASSFILE=/home/app/.pgpass",
-                                      "the password= field", "the pwd= flag and host= flag",
+                                      "the pwd= flag and host= flag",
                                       "host=db port=5432 dbname=x",
                                       "Data Source=db;Initial Catalog=x;Integrated Security=true"])
     def test_non_credentials_kept(self, text):
         _assert_unchanged(text)
+
+    def test_fork_divergence_whitespace_password_assignment_masked(self):
+        # Fork divergence: the fork's inline-assignment pass (_INLINE_SECRET_ASSIGN_RE,
+        # wired into _redact_assignments) deliberately masks whitespace-delimited
+        # credential-keyword assignments so stringified provider payloads
+        # (``status=ok password=…``) cannot pass through unmasked. Upstream's prose
+        # carve-out for "the password= field" therefore does not apply here; the
+        # mask-instead-of-keep behavior is pinned by
+        # tests/agent/test_redact.py::test_whitespace_delimited_inline_credential_keywords_mask.
+        assert "field" not in redact_sensitive_text("the password= field", force=True)
 
 
 class TestUserinfoAndBasicPairs:

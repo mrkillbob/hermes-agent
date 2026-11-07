@@ -835,17 +835,25 @@ _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\u2060\
 _TOKEN_BODY_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.")
 
 
+def _prefix_body_boundary(pattern: str) -> str:
+    """Trailing boundary class for one prefix pattern.
+
+    Built-in variable-length families declare their final body alphabet: a
+    separator outside that alphabet (``ghp_<tok>-suffix``) must not hide the
+    preceding token. Keep fixed-length/compound patterns and plugin contracts
+    on the full identifier boundary.
+    """
+    tail = re.search(r"(\[[^]]+\])\{\d+,\}$", pattern)
+    if pattern in _PREFIX_PATTERNS and tail is not None:
+        return tail.group(1)
+    return r"[A-Za-z0-9_-]"
+
+
 def _compile_prefix_matcher(patterns: list) -> re.Pattern[str]:
-    alternatives = []
-    for pattern in patterns:
-        boundary = r"[A-Za-z0-9_-]"
-        # Built-in variable-length families declare their final body alphabet.
-        # A separator outside that alphabet must not hide the preceding token.
-        # Keep fixed-length/compound patterns and plugin contracts unchanged.
-        tail = re.search(r"(\[[^]]+\])\{\d+,\}$", pattern)
-        if pattern in _PREFIX_PATTERNS and tail is not None:
-            boundary = tail.group(1)
-        alternatives.append("(?:" + pattern + ")(?!" + boundary + ")")
+    alternatives = [
+        "(?:" + pattern + ")(?!" + _prefix_body_boundary(pattern) + ")"
+        for pattern in patterns
+    ]
     return re.compile(r"(?<![A-Za-z0-9_-])(" + "|".join(alternatives) + ")")
 
 
@@ -858,11 +866,14 @@ def _compile_prefix_sub_matcher(patterns: list) -> re.Pattern[str]:
     # register_redaction_patterns): admitting ``-``/``_`` before a key makes every separator a
     # candidate, and a flat 60-way alternation per candidate doubled the cost of a ``_ghp_`` flood.
     # Groups are disjoint by first char, so leftmost-first match order is unchanged.
+    # The trailing boundary is per-pattern (see _prefix_body_boundary), not a single
+    # outer lookahead, or a ``-``/``_`` separator would hide every variable-length token.
     by_first: dict = {}
     for pattern in patterns:
-        by_first.setdefault(pattern[0], []).append(pattern[1:])
+        alternative = "(?:" + pattern[1:] + ")(?!" + _prefix_body_boundary(pattern) + ")"
+        by_first.setdefault(pattern[0], []).append(alternative)
     body = "|".join(f"{re.escape(c)}(?:{'|'.join(rest)})" for c, rest in by_first.items())
-    return re.compile(r"(?<![A-Za-z0-9])(" + body + r")(?![A-Za-z0-9_-])")
+    return re.compile(r"(?<![A-Za-z0-9])(" + body + r")")
 
 
 _PREFIX_RE = _compile_prefix_matcher(_PREFIX_PATTERNS)
